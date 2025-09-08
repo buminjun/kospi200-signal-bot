@@ -1,33 +1,23 @@
-# 기본 설정
-equity: 10000000          # 총 운용자금(예: 천만원)
-risk: 0.01                 # 1% 리스크
-max_positions: 5           # 최대 동시 보유
-universe_csv: "kospi200.csv"
-positions_csv: "positions.csv"
-lookback: 120              # 지표계산용 최근 일수
+name: KOSPI200 Signals (EOD)
 
-# 신호 조건
-entry:
-  hhv_window: 30           # 30일 고가 돌파
-  buffer: 0.002            # 0.2% 버퍼(슬리피지 완충)
-  require_ma_trend: true   # SMA20 ≥ SMA60 조건 사용
+on:
+  schedule:
+    - cron: "35 6 * * 1-5"   # KST 15:35
+  workflow_dispatch:
 
-exit:
-  stop_atr_multiple: 1.5   # ATR 손절
-  ma_exit: true            # 종가가 SMA20 하향 이탈시 매도
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run EOD Scan
+        run: python scanner.py --mode eod
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_URL:           ${{ secrets.NTFY_URL }}
 
-# 텔레그램 (환경변수로도 가능)
-telegram:
-  enabled: true
-  token_env: "8319549550:AAFPbbMTNdpcj8Ve0zU8jh5WdI3VYcQcm4w"
-  chat_id_env: "953083803"
-
-# 선택: ntfy (사내망 등 텔레그램 막힐 때)
-ntfy:
-  enabled: false
-  url_env: "https://ntfy.sh/my-secret-materials-topic"      # 예: https://ntfy.sh/my-secret-materials-topic
-
-# 실행 모드
-market_hours:
-  start_kst: "09:00"
-  end_kst: "15:30"
