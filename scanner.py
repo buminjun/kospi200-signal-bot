@@ -295,6 +295,14 @@ def scan_once(cfg):
         pos = pos[~pos['code'].isin(closed_codes)]
 
     save_positions(pos, cfg["positions_csv"])
+    # --- 하루 요약 알림(신호 없어도 보냄) ---
+    summary = (f"📬 EOD 스캔 완료\n"
+               f"대상: {len(uni)}개\n"
+               f"매수 신호: {len(buy_candidates)}개\n"
+               f"매도 신호: {len(sell_candidates)}개\n"
+               f"시각: {ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
+    _notify(summary, use_tg, use_ntfy,
+            cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
 
 def main():
     ap = argparse.ArgumentParser(description="KOSPI200 Signal Bot")
@@ -319,3 +327,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
