@@ -14,6 +14,18 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
+        # 👇👇 추가 (디버그용, 1~2회만 유지해도 됩니다)
+      - name: Debug – list files
+        run: |
+          pwd
+          ls -al
+          python -V
+      - name: Run EOD Scan
+        run: python -u scanner.py --mode eod
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_URL:           ${{ secrets.NTFY_URL }}
       - name: Run EOD Scan
         run: python scanner.py --mode eod
         env:
