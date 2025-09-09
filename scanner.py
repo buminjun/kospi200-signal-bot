@@ -127,7 +127,6 @@ def inside_market_hours(cfg):
     return (t >= s) and (t <= e)
 
 def should_send_summary(ts, every_min=60):
-    """현재 시각의 분이 every_min의 배수일 때만 True (예: 60 → 매시 정각)"""
     try:
         every = int(every_min)
         if every <= 0: every = 60
@@ -136,15 +135,9 @@ def should_send_summary(ts, every_min=60):
     return (ts.minute % every) == 0
 
 # -----------------------------
-# 데이터 소스: 개별 종목 (pykrx → yfinance 폴백)
+# 데이터 소스
 # -----------------------------
 def fetch_daily_df(code, start, end):
-    """
-    1) pykrx(Naver) 시도
-    2) 실패 시 yfinance 폴백 (.KS → .KQ)
-    반환: columns = open, high, low, close, volume
-    """
-    # requests 세션(리트라이)
     sess = requests.Session()
     retries = Retry(total=3, backoff_factor=1.0, status_forcelist=[429, 500, 502, 503, 504])
     sess.mount("http://", HTTPAdapter(max_retries=retries))
@@ -174,14 +167,9 @@ def fetch_daily_df(code, start, end):
                 return ydf
         except Exception as e:
             print(f"[yfinance] {code}{suffix} 조회 실패 → {e}")
-
     return pd.DataFrame()
 
-# -----------------------------
-# 벤치마크(KOSPI) 종가 시리즈
-# -----------------------------
 def fetch_kospi_close(start, end):
-    # FDR 우선
     try:
         kospi = fdr.DataReader("KS11", start, end)
         if kospi is not None and not kospi.empty and "Close" in kospi.columns:
@@ -190,7 +178,6 @@ def fetch_kospi_close(start, end):
             return s
     except Exception as e:
         print(f"[FDR] KS11 실패 → {e}")
-    # yfinance 폴백
     try:
         y = yf.Ticker("^KS11").history(start=start, end=end, interval="1d", auto_adjust=False)
         if y is not None and not y.empty and "Close" in y.columns:
@@ -232,7 +219,6 @@ def scan_once(cfg):
     uni = load_universe(cfg["universe_csv"])
     pos = load_positions(cfg["positions_csv"])
 
-    # 날짜 포맷: pykrx는 YYYYMMDD, yfinance/FDR는 YYYY-MM-DD
     start_dt = (now_kst() - timedelta(days=400)).date()
     end_dt   = now_kst().date()
     start_krx = start_dt.strftime("%Y%m%d")
@@ -240,15 +226,11 @@ def scan_once(cfg):
     start_iso = start_dt.strftime("%Y-%m-%d")
     end_iso   = end_dt.strftime("%Y-%m-%d")
 
-    # RS/HHV 파라미터
     rs_win = int(cfg.get("filters", {}).get("rs_window", 60))
     rs_min = float(cfg.get("filters", {}).get("rs_min", 1.0))
     hhv_win = int(cfg.get("entry", {}).get("hhv_window", 30))
-
-    # 요약 알림 주기(분) — 기본 60
     summary_every = int(cfg.get("notifications", {}).get("summary_every_min", 60))
 
-    # KOSPI 종가(벤치마크)
     kospi_close = fetch_kospi_close(start_iso, end_iso)
 
     buy_candidates = []
@@ -261,27 +243,24 @@ def scan_once(cfg):
         if df.empty or len(df) < max(70, rs_win + 5):
             continue
 
-        # 지표 계산 (RS 포함)
         ind = compute_indicators(
             df, lookback=cfg["lookback"],
             kospi_close=kospi_close, rs_window=rs_win, hhv_window=hhv_win
         )
         last = ind.iloc[-1]
 
-        # ===== 매수 신호 (RS 필터 포함) =====
         if entry_signal(
             last,
             buffer=cfg["entry"]["buffer"],
             require_ma_trend=cfg["entry"]["require_ma_trend"],
             rs_min=rs_min
         ):
-            if not (pos["code"] == code).any():  # 미보유만
+            if not (pos["code"] == code).any():
                 atr_val = float(last["ATR14"]) if pd.notna(last["ATR14"]) else None
                 shares = position_size(cfg["equity"], cfg["risk"], atr_val)
                 if shares > 0:
                     buy_candidates.append((code, name, last, shares))
 
-        # ===== 매도 신호 =====
         if (pos["code"] == code).any():
             p = pos.loc[pos["code"] == code].iloc[0]
             entry_price = float(p["entry_price"])
@@ -294,24 +273,20 @@ def scan_once(cfg):
                 reason = []
                 if cfg["exit"]["ma_exit"] and sma20_now is not None and price_now < sma20_now:
                     reason.append("SMA20 하향이탈")
-                # ATR 손절 사유는 실제 손절 트리거 시 매도 조건에서 충족하므로 메시지만 명시
-                if atr_entry and entry_price <= (entry_price - cfg["exit"]["stop_atr_multiple"] * atr_entry):
-                    reason.append(f"ATR {cfg['exit']['stop_atr_multiple']}배 손절")
                 sell_candidates.append((code, name, price_now, " + ".join(reason) if reason else "규칙 충족"))
 
-        # ===== HHV30 근접 후보 =====
         if pd.notna(last.get("HHV30")) and last["HHV30"] > 0:
             dist = (float(last["HHV30"]) - float(last["close"])) / float(last["HHV30"])
             if 0 <= dist <= float(cfg.get("watchlist", {}).get("near_hhv30_pct", 0.01)):
                 near_candidates.append((code, name, float(dist)))
 
-    # ===== 알림 & 포지션 갱신 =====
+    ts = now_kst()
+    market_open = inside_market_hours(cfg)
     use_tg   = cfg["telegram"]["enabled"]
     use_ntfy = cfg["ntfy"]["enabled"]
-    ts = now_kst()
 
-    # 매수
-    if buy_candidates:
+    # --- 매수/매도: 장중에만 ---
+    if market_open and buy_candidates:
         current_n = len(pos)
         capacity = max(cfg["max_positions"] - current_n, 0)
         for code, name, last, shares in buy_candidates[:capacity]:
@@ -327,20 +302,20 @@ def scan_once(cfg):
             }
             pos = pd.concat([pos, pd.DataFrame([new_row])], ignore_index=True)
 
-    # 매도
-    closed_codes = []
-    for code, name, price_now, reason in sell_candidates:
-        msg = format_sell_msg(ts, code, name, price_now, reason)
-        _notify(msg, use_tg, use_ntfy,
-                cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
-        closed_codes.append(code)
-    if closed_codes:
-        pos = pos[~pos["code"].isin(closed_codes)]
+    if market_open and sell_candidates:
+        closed_codes = []
+        for code, name, price_now, reason in sell_candidates:
+            msg = format_sell_msg(ts, code, name, price_now, reason)
+            _notify(msg, use_tg, use_ntfy,
+                    cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
+            closed_codes.append(code)
+        if closed_codes:
+            pos = pos[~pos["code"].isin(closed_codes)]
 
     save_positions(pos, cfg["positions_csv"])
 
-    # --- 요약 알림: 지정 주기(기본 60분)일 때만 발송 ---
-    if should_send_summary(ts, summary_every):
+    # --- 요약: 장중 + 지정주기 ---
+    if market_open and should_send_summary(ts, summary_every):
         summary = (f"📬 스캔 요약\n"
                    f"대상: {len(uni)}개\n"
                    f"매수 신호: {len(buy_candidates)}개\n"
@@ -350,8 +325,8 @@ def scan_once(cfg):
         _notify(summary, use_tg, use_ntfy,
                 cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
 
-    # --- HHV30 근접 후보 알림 (Top 10) : 조건 있을 때마다 발송 ---
-    if near_candidates:
+    # --- HHV30 근접 Top10: 장중 + 지정주기 ---
+    if market_open and near_candidates and should_send_summary(ts, summary_every):
         near_candidates.sort(key=lambda x: x[2])
         top = near_candidates[:10]
         pct_txt = f"{int(float(cfg.get('watchlist', {}).get('near_hhv30_pct', 0.01))*100)}%"
@@ -390,6 +365,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
