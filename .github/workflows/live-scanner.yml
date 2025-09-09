@@ -2,8 +2,9 @@ name: Live Scanner (KOSPI200)
 
 on:
   schedule:
-    # KST 09:00~15:30 == UTC 00:00~06:30 (월~금)
-    - cron: "*/5 0-6 * * 1-5"
+    # 월~금, KST 09:00~15:30만 실행 (UTC 기준)
+    - cron: "*/5 0-5 * * 1-5"     # 00:00–05:59 UTC (KST 09:00–14:59)
+    - cron: "0-30/5 6 * * 1-5"    # 06:00–06:30 UTC (KST 15:00–15:30)
   workflow_dispatch: {}
 
 permissions:
