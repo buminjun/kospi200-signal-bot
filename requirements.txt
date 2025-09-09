@@ -6,6 +6,4 @@ PyYAML==6.0.2
 pytz==2024.1
 yfinance==0.2.41
 tzdata==2024.1
-FinanceDataReader==0.9.90
-
-
+finance-datareader>=0.9.70
