@@ -1,10 +1,16 @@
 # backtest.py
-import os, argparse
+import os, argparse, time
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import yaml
+
+# 1) FDR 우선 사용
+import FinanceDataReader as fdr
+# 2) 실패 시 yfinance 폴백
+import yfinance as yf
+import requests
+from requests.adapters import HTTPAdapter, Retry
 
 # ===== 설정 로드 =====
 def load_config(path="config.yaml"):
@@ -48,7 +54,7 @@ def atr(df, period=14):
     return tr.rolling(period).mean()
 
 def compute_ind(ydf):
-    # yfinance 컬럼명(Open/High/Low/Close/Volume)
+    # 컬럼명: Open/High/Low/Close/Volume
     df = ydf.copy()
     out = pd.DataFrame(index=df.index)
     out["Open"]  = df["Open"]
@@ -74,31 +80,52 @@ def exit_hit(price, entry, atr_entry, sma20, use_ma=True, stop_mult=1.5):
     cond_ma   = (price < sma20) if (use_ma and pd.notna(sma20)) else False
     return bool(cond_stop or cond_ma)
 
-# ===== 데이터 다운로드 (yfinance) =====
-def fetch_ydf(code, start_dt, end_dt):
-    """
-    .KS 우선, 실패 시 .KQ. 둘 다 실패하면 빈 DF 반환.
-    yfinance가 'possibly delisted; No timezone found' 을 던져도 그냥 스킵.
-    """
-    # 세션/리트라이 약간의 안정화
-    import requests
-    from requests.adapters import HTTPAdapter, Retry
+# ===== yfinance 백오프 래퍼 =====
+def _yf_history_with_backoff(ticker, start_dt, end_dt, tries=4, base_sleep=2.0):
+    """429 등일 때 점증 대기하며 재시도"""
+    # 세션(리트라이) 세팅
     sess = requests.Session()
     retries = Retry(total=3, backoff_factor=0.7, status_forcelist=[429, 500, 502, 503, 504])
     sess.mount("https://", HTTPAdapter(max_retries=retries))
     sess.mount("http://",  HTTPAdapter(max_retries=retries))
+    yft = yf.Ticker(ticker, session=sess)
+    for k in range(tries):
+        try:
+            df = yft.history(start=start_dt, end=end_dt, interval="1d", auto_adjust=False)
+            if df is not None and not df.empty and {"Open","High","Low","Close","Volume"}.issubset(df.columns):
+                return df
+        except Exception as e:
+            # 429일 가능성 포함 → 대기 후 재시도
+            wait = base_sleep * (2 ** k)
+            print(f"[yfinance] {ticker} 실패 → {e} ; {wait:.1f}s 후 재시도")
+            time.sleep(wait)
+    return pd.DataFrame()
 
+# ===== 단일 종목 데이터: FDR → yfinance 폴백 =====
+def fetch_kr_df(code, start_dt, end_dt):
+    """
+    1) FinanceDataReader: 심볼 '005930' 그대로 사용 가능
+    2) 실패 시 yfinance: .KS → .KQ 순서, 백오프 재시도
+    반환: Open/High/Low/Close/Volume 컬럼
+    """
+    # 1) FDR
+    try:
+        # FDR은 날짜 문자열/Datetime 둘 다 지원
+        fdf = fdr.DataReader(code, start_dt, end_dt)
+        # FDR 기본 컬럼: Open, High, Low, Close, Volume, Change
+        if fdf is not None and not fdf.empty:
+            cols = ["Open","High","Low","Close","Volume"]
+            if set(cols).issubset(fdf.columns):
+                return fdf[cols]
+    except Exception as e:
+        print(f"[FDR] {code} 실패 → {e}")
+
+    # 2) yfinance 폴백
     for suffix in (".KS", ".KQ"):
         t = f"{code}{suffix}"
-        try:
-            yft = yf.Ticker(t, session=sess)
-            # 날짜 범위 직접 지정(최근 4년 받아서 이후 3년만 사용)
-            ydf = yft.history(start=start_dt, end=end_dt, interval="1d", auto_adjust=False)
-            if ydf is not None and not ydf.empty and {"Open","High","Low","Close","Volume"}.issubset(ydf.columns):
-                return ydf
-        except Exception as e:
-            print(f"[yfinance] {t} 실패 → {e}")
-            continue
+        ydf = _yf_history_with_backoff(t, start_dt, end_dt, tries=4, base_sleep=2.0)
+        if ydf is not None and not ydf.empty:
+            return ydf
     return pd.DataFrame()
 
 # ===== 백테스트 =====
@@ -124,7 +151,7 @@ def backtest(cfg, years=3):
 
     for _, row in uni.iterrows():
         code, name = row["code"], row["name"]
-        ydf = fetch_ydf(code, start_dl, end)
+        ydf = fetch_kr_df(code, start_dl, end)
         if ydf.empty or len(ydf) < 100:
             n_fail += 1
             continue
@@ -196,7 +223,6 @@ def backtest(cfg, years=3):
 
     eq = pd.DataFrame(equity_curve).drop_duplicates("date", keep="last")
 
-    # 메타 정보
     meta = {
         "universe_total": int(len(uni)),
         "download_ok": int(n_ok),
@@ -245,7 +271,7 @@ def main():
     eq.to_csv("bt_out/equity_curve.csv", index=False, encoding="utf-8")
     pd.DataFrame([meta]).to_csv("bt_out/meta.csv", index=False, encoding="utf-8")
 
-    # 요약 텔레그램 (None/NaN 안전 포맷)
+    # 요약 텔레그램
     s = st.iloc[0].to_dict()
     payoff_txt = format_float(s.get("payoff_ratio"), 2, "N/A")
     msg = (
@@ -265,4 +291,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
