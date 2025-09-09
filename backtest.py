@@ -5,9 +5,8 @@ import pandas as pd
 import numpy as np
 import yaml
 
-# 1) FDR 우선
+# 데이터 소스: FDR 우선, yfinance 폴백(+백오프)
 import FinanceDataReader as fdr
-# 2) yfinance 폴백(+백오프)
 import yfinance as yf
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -79,26 +78,38 @@ def atr(df, period=14):
     tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
-def compute_ind(ydf):
-    # 컬럼명: Open/High/Low/Close/Volume
+def compute_ind(ydf, kospi_close, hhv_win=30, rs_window=60):
+    """
+    ydf: 종목 OHLCV (index = Date)
+    kospi_close: 코스피 종가 시리즈 (ydf 인덱스와 align)
+    """
     df = ydf.copy()
     out = pd.DataFrame(index=df.index)
     out["Open"]  = df["Open"]
     out["High"]  = df["High"]
     out["Low"]   = df["Low"]
     out["Close"] = df["Close"]
+
     out["SMA20"] = sma(out["Close"], 20)
     out["SMA60"] = sma(out["Close"], 60)
     out["ATR14"] = atr(out, 14)
-    out["HHV30"] = out["High"].rolling(30, min_periods=30).max().shift(1)
+    # 전일까지의 HHV(hhv_win)
+    out["HHV"]   = out["High"].rolling(hhv_win, min_periods=hhv_win).max().shift(1)
+
+    # 상대강도 RS (종목 60일 수익률 / KOSPI 60일 수익률)
+    market = kospi_close.reindex(out.index)
+    base   = out["Close"] / out["Close"].shift(rs_window)
+    bench  = market / market.shift(rs_window)
+    out["RS"] = base / bench
     return out
 
-def entry_ok(r, buffer, require_ma):
-    if pd.isna(r["HHV30"]) or pd.isna(r["SMA20"]) or pd.isna(r["SMA60"]):
+def entry_ok(r, buffer, require_ma, rs_min):
+    if any(pd.isna(r[k]) for k in ["HHV","SMA20","SMA60","RS"]):
         return False
-    cond_break = r["Close"] >= r["HHV30"] * (1.0 + buffer)
+    cond_break = r["Close"] >= r["HHV"] * (1.0 + buffer)
     cond_ma    = (r["SMA20"] >= r["SMA60"]) if require_ma else True
-    return bool(cond_break and cond_ma)
+    cond_rs    = (r["RS"] >= rs_min)
+    return bool(cond_break and cond_ma and cond_rs)
 
 def exit_hit(price, entry, atr_entry, sma20, use_ma=True, stop_mult=1.5):
     cond_stop = price <= (entry - (stop_mult * atr_entry)) if (atr_entry and atr_entry>0) else False
@@ -129,7 +140,7 @@ def _yf_history_with_backoff(ticker, start_dt, end_dt, tries=4, base_sleep=2.0):
 def fetch_kr_df(code, start_dt, end_dt):
     """
     1) FinanceDataReader: 심볼 '005930' 그대로 사용
-    2) 실패 시 yfinance: .KS → .KQ 순서, 백오프 재시도
+    2) yfinance 폴백: .KS → .KQ 순서, 백오프 재시도
     반환: Open/High/Low/Close/Volume 컬럼
     """
     # FDR
@@ -161,6 +172,12 @@ def backtest(cfg, years=3):
     start_dl = end - timedelta(days=int(365*(years+1)))  # 다운로드 여유
     start_bt = end - timedelta(days=int(365*years))      # 실제 테스트 시작
 
+    # KOSPI 지수(벤치마크) 다운로드
+    kospi = fdr.DataReader("KS11", start_dl, end)
+    if kospi is None or kospi.empty or "Close" not in kospi.columns:
+        raise RuntimeError("KOSPI 지수(KS11) 다운로드 실패")
+    kospi_close = kospi["Close"]
+
     trades = []
     equity = 1.0
     equity_curve = []
@@ -170,6 +187,13 @@ def backtest(cfg, years=3):
     req = bool(cfg["entry"]["require_ma_trend"])
     use_ma_exit = bool(cfg["exit"]["ma_exit"])
     stop_mult   = float(cfg["exit"]["stop_atr_multiple"])
+
+    # RS 파라미터(없으면 기본값)
+    rs_window = int(cfg.get("filters", {}).get("rs_window", 60))   # 60일
+    rs_min    = float(cfg.get("filters", {}).get("rs_min", 1.0))   # 1.0 = 시장 이상
+
+    # HHV 창(기본 30) — config에 있으면 반영
+    hhv_win = int(cfg.get("entry", {}).get("hhv_window", 30))
 
     n_fail = n_ok = 0
     bad_entry = bad_exit = 0
@@ -187,18 +211,18 @@ def backtest(cfg, years=3):
             n_fail += 1
             continue
 
-        df = compute_ind(ydf)
+        df = compute_ind(ydf, kospi_close, hhv_win=hhv_win, rs_window=rs_window)
         in_pos = False
         entry_price = atr_entry = None
         entry_date  = None
 
         # 다음날 시가 체결 가정
-        for i in range(60, len(df)-1):
+        for i in range(max(60, rs_window), len(df)-1):
             today = df.iloc[i]
             nxt   = df.iloc[i+1]
 
             # 진입
-            if not in_pos and entry_ok(today, buf, req):
+            if not in_pos and entry_ok(today, buf, req, rs_min=rs_min):
                 ep = safe_price(nxt.get("Open"))
                 if ep is None:
                     ep = safe_price(nxt.get("Close"))  # 대체
@@ -271,6 +295,9 @@ def backtest(cfg, years=3):
         "bad_exit": int(bad_exit),
         "start": str(start_bt),
         "end":   str(end),
+        "rs_window": rs_window,
+        "rs_min": rs_min,
+        "hhv_window": hhv_win
     }
     return tr, st, eq, meta
 
@@ -311,13 +338,15 @@ def main():
     eq.to_csv("bt_out/equity_curve.csv", index=False, encoding="utf-8")
     pd.DataFrame([meta]).to_csv("bt_out/meta.csv", index=False, encoding="utf-8")
 
-    # 텔레그램 요약 (안전 포맷)
+    # 텔레그램 요약
     s = st.iloc[0].to_dict()
     msg = (
         f"📊 KOSPI200 백테스트 ({args.years}년)\n"
         f"기간: {meta['start']} ~ {meta['end']}\n"
         f"커버: {meta['download_ok']}/{meta['universe_total']} (실패 {meta['download_fail']})\n"
         f"데이터 이상: 진입{meta['bad_entry']}, 청산{meta['bad_exit']}\n"
+        f"RS필터: window={meta['rs_window']}, min={meta['rs_min']}\n"
+        f"HHV window: {meta['hhv_window']}\n"
         f"트레이드 수: {int(s['n_trades'])}\n"
         f"승률: {format_float(s['win_rate'], 1)}%\n"
         f"평균 수익: {format_float(s['avg_win'])}% / 평균 손실: {format_float(s['avg_loss'])}%\n"
@@ -331,3 +360,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
