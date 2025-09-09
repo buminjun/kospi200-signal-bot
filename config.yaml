@@ -17,7 +17,7 @@ exit:
   ma_exit: true
 
 filters:
-  rs_window: 60        # RS 계산 기간(일): 60 또는 120 추천
+  rs_window: 120        # RS 계산 기간(일): 60 또는 120 추천
   rs_min: 1.0          # RS 하한: 1.0=시장 이상, 1.05=시장 대비 +5% 우위
 
 
@@ -33,6 +33,7 @@ ntfy:
 market_hours:
   start_kst: "09:00"
   end_kst: "15:30"
+
 
 
 
