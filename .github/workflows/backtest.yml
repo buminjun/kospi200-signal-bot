@@ -1,0 +1,29 @@
+name: Backtest (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "백테스트 기간(년)"
+        required: true
+        default: "3"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run backtest
+        run: python -u backtest.py --years ${{ github.event.inputs.years }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bt_out
+          path: bt_out/
