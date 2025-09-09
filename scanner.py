@@ -126,6 +126,15 @@ def inside_market_hours(cfg):
     e = datetime.strptime(cfg["market_hours"]["end_kst"], "%H:%M").time()
     return (t >= s) and (t <= e)
 
+def should_send_summary(ts, every_min=60):
+    """현재 시각의 분이 every_min의 배수일 때만 True (예: 60 → 매시 정각)"""
+    try:
+        every = int(every_min)
+        if every <= 0: every = 60
+    except Exception:
+        every = 60
+    return (ts.minute % every) == 0
+
 # -----------------------------
 # 데이터 소스: 개별 종목 (pykrx → yfinance 폴백)
 # -----------------------------
@@ -231,10 +240,13 @@ def scan_once(cfg):
     start_iso = start_dt.strftime("%Y-%m-%d")
     end_iso   = end_dt.strftime("%Y-%m-%d")
 
-    # RS 파라미터
+    # RS/HHV 파라미터
     rs_win = int(cfg.get("filters", {}).get("rs_window", 60))
     rs_min = float(cfg.get("filters", {}).get("rs_min", 1.0))
     hhv_win = int(cfg.get("entry", {}).get("hhv_window", 30))
+
+    # 요약 알림 주기(분) — 기본 60
+    summary_every = int(cfg.get("notifications", {}).get("summary_every_min", 60))
 
     # KOSPI 종가(벤치마크)
     kospi_close = fetch_kospi_close(start_iso, end_iso)
@@ -282,6 +294,7 @@ def scan_once(cfg):
                 reason = []
                 if cfg["exit"]["ma_exit"] and sma20_now is not None and price_now < sma20_now:
                     reason.append("SMA20 하향이탈")
+                # ATR 손절 사유는 실제 손절 트리거 시 매도 조건에서 충족하므로 메시지만 명시
                 if atr_entry and entry_price <= (entry_price - cfg["exit"]["stop_atr_multiple"] * atr_entry):
                     reason.append(f"ATR {cfg['exit']['stop_atr_multiple']}배 손절")
                 sell_candidates.append((code, name, price_now, " + ".join(reason) if reason else "규칙 충족"))
@@ -326,17 +339,18 @@ def scan_once(cfg):
 
     save_positions(pos, cfg["positions_csv"])
 
-    # --- 요약 알림(신호 없어도 보냄) ---
-    summary = (f"📬 스캔 완료\n"
-               f"대상: {len(uni)}개\n"
-               f"매수 신호: {len(buy_candidates)}개\n"
-               f"매도 신호: {len(sell_candidates)}개\n"
-               f"RS(window={rs_win}, min={rs_min}) / HHV={hhv_win}\n"
-               f"시각: {ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
-    _notify(summary, use_tg, use_ntfy,
-            cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
+    # --- 요약 알림: 지정 주기(기본 60분)일 때만 발송 ---
+    if should_send_summary(ts, summary_every):
+        summary = (f"📬 스캔 요약\n"
+                   f"대상: {len(uni)}개\n"
+                   f"매수 신호: {len(buy_candidates)}개\n"
+                   f"매도 신호: {len(sell_candidates)}개\n"
+                   f"RS(window={rs_win}, min={rs_min}) / HHV={hhv_win}\n"
+                   f"시각: {ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
+        _notify(summary, use_tg, use_ntfy,
+                cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
 
-    # --- HHV30 근접 후보 알림 (Top 10) ---
+    # --- HHV30 근접 후보 알림 (Top 10) : 조건 있을 때마다 발송 ---
     if near_candidates:
         near_candidates.sort(key=lambda x: x[2])
         top = near_candidates[:10]
@@ -376,6 +390,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
