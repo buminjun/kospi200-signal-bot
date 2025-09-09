@@ -34,6 +34,11 @@ market_hours:
   start_kst: "09:00"
   end_kst: "15:30"
 
+notifications:
+  summary_every_min: 60   # 60=매시 정각에만 요약 발송 (5, 10, 30 등도 가능)
+  
+
+
 
 
 
