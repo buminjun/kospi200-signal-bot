@@ -6,6 +6,8 @@ positions_csv: "positions.csv"
 lookback: 120
 
 entry:
+  watchlist:
+  near_hhv30_pct: 0.01   # HHV30의 1% 이내이면 근접 후보
   hhv_window: 30
   buffer: 0.002
   require_ma_trend: true
@@ -26,4 +28,5 @@ ntfy:
 market_hours:
   start_kst: "09:00"
   end_kst: "15:30"
+
 
