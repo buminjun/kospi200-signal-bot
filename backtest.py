@@ -90,7 +90,7 @@ def compute_ind(ydf):
     out["SMA20"] = sma(out["Close"], 20)
     out["SMA60"] = sma(out["Close"], 60)
     out["ATR14"] = atr(out, 14)
-    out["HHV30"] = out["High"].rolling(30).max()
+    out["HHV30"] = out["High"].rolling(30, min_periods=30).max().shift(1)
     return out
 
 def entry_ok(r, buffer, require_ma):
