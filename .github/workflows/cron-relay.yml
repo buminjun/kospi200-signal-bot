@@ -1,0 +1,49 @@
+name: Cron Relay (KOSPI200)
+
+on:
+  schedule:
+    - cron: "*/5 * * * 1-5"   # 월~금 매 5분 (UTC)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: cron-relay
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scanner (live)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_URL:           ${{ secrets.NTFY_URL }}
+        run: python -u scanner.py --mode eod
+
+      - name: Commit positions if changed
+        run: |
+          git config user.name  "live-bot"
+          git config user.email "live-bot@users.noreply.github.com"
+          git add positions.csv
+          if git diff --cached --quiet; then
+            echo "No position changes."
+          else
+            git commit -m "chore: update positions [skip ci]"
+            git push
+          fi
