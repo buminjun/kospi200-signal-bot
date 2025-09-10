@@ -327,7 +327,7 @@ def scan_once(cfg):
                 cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
 
     # --- HHV30 근접 Top10: 장중 + 지정주기 ---
-    if ((market_open and near_candidates and should_send_summary(ts, summary_every)) or force_summary:) and near_candidates:
+    if ((market_open and near_candidates and should_send_summary(ts, summary_every)) or force_summary) and near_candidates:
         near_candidates.sort(key=lambda x: x[2])
         top = near_candidates[:10]
         pct_txt = f"{int(float(cfg.get('watchlist', {}).get('near_hhv30_pct', 0.01))*100)}%"
@@ -366,6 +366,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
