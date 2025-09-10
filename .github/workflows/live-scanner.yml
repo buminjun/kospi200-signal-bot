@@ -2,8 +2,8 @@ name: Live Scanner (KOSPI200)
 
 on:
   schedule:
-    - cron: "*/5 * * * 1-5"   # 월~금, 매 5분 (UTC). 장외엔 코드가 알아서 알림 안 보냄
-  workflow_dispatch: {}       # 수동 실행도 허용
+    - cron: "*/6 * * * 1-5"   # 월~금, 매 6분마다 (임시)
+  workflow_dispatch: {}
 
 permissions:
   contents: write
