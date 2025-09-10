@@ -2,12 +2,11 @@ name: Live Scanner (KOSPI200)
 
 on:
   schedule:
-    # 월~금, KST 09:00~15:55 사이 5분 간격 (UTC 00:00~06:55)
-    - cron: "*/5 0-6 * * 1-5"
-  workflow_dispatch: {}
+    - cron: "*/5 * * * 1-5"   # 월~금, 매 5분 (UTC). 장외엔 코드가 알아서 알림 안 보냄
+  workflow_dispatch: {}       # 수동 실행도 허용
 
 permissions:
-  contents: write   # positions.csv 커밋을 위해 필요
+  contents: write
 
 concurrency:
   group: live-scanner
@@ -17,15 +16,12 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
 
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
       - name: Install dependencies
         run: |
@@ -37,8 +33,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_URL:           ${{ secrets.NTFY_URL }}
-        run: |
-          python -u scanner.py --mode eod
+        run: python -u scanner.py --mode eod
 
       - name: Commit positions if changed
         run: |
@@ -51,3 +46,4 @@ jobs:
             git commit -m "chore: update positions [skip ci]"
             git push
           fi
+
