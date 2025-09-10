@@ -2,7 +2,7 @@ name: Hourly Summary (KST)
 
 on:
   schedule:
-    # KST 09:00~15:00 "정시"에만 1회 실행 (UTC 00~06시, 매 시 00분)
+    # KST 09:00~15:00 정시에 1회 (UTC 00~06시 정각)
     - cron: "0 0-5 * * 1-5"
     - cron: "0 6 * * 1-5"
   workflow_dispatch:
@@ -24,11 +24,11 @@ jobs:
         with: { python-version: "3.11" }
       - run: pip install -r requirements.txt
 
-      # 요약 강제 플래그만 켜서 "정시 1회" 요약을 보냄
       - name: Run hourly summary
-        run: python -u scanner.py --mode eod
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_URL:           ${{ secrets.NTFY_URL }}
-          FORCE_SUMMARY: "1"      # 👈 이 줄이 핵심!
+          FORCE_SUMMARY: "1"           # ⬅️ 이게 핵심
+        run: python -u scanner.py --mode eod
+
