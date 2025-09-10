@@ -2,9 +2,8 @@ name: Live Scanner (KOSPI200)
 
 on:
   schedule:
-    - cron: "*/6 * * * 1-5"
+    - cron: "*/5 * * * 1-5"
   workflow_dispatch: {}
-
 
 permissions:
   contents: write
