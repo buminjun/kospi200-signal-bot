@@ -2,7 +2,7 @@ name: Live Scanner (KOSPI200)
 
 on:
   schedule:
-    - cron: "*/6 * * * 1-5"   # 월~금, 매 6분마다 (임시)
+    - cron: "*/5 * * * 1-5"   # 월~금, 매 5분마다 (임시)
   workflow_dispatch: {}
 
 permissions:
