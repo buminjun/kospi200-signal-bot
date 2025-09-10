@@ -284,6 +284,7 @@ def scan_once(cfg):
     market_open = inside_market_hours(cfg)
     use_tg   = cfg["telegram"]["enabled"]
     use_ntfy = cfg["ntfy"]["enabled"]
+    force_summary = os.getenv("FORCE_SUMMARY", "0") == "1"
 
     # --- 매수/매도: 장중에만 ---
     if market_open and buy_candidates:
@@ -365,6 +366,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
