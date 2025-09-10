@@ -14,15 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - run: pip install -r requirements.txt
+
       - name: Run EOD Scan
         run: python -u scanner.py --mode eod
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_URL:           ${{ secrets.NTFY_URL }}
-
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          NTFY_URL:           ${{ secrets.NTFY_URL }}
-
