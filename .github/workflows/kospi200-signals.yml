@@ -2,7 +2,7 @@ name: KOSPI200 Signals (EOD)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # KST 15:35
+    - cron: "35 6 * * 1-5"   # KST 15:35
   workflow_dispatch:
 
 permissions:
