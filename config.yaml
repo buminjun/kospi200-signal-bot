@@ -15,10 +15,12 @@ entry:
 exit:
   stop_atr_multiple: 1.5
   ma_exit: true
+  time_stop: 5
 
 filters:
   rs_window: 120        # RS 계산 기간(일): 60 또는 120 추천
   rs_min: 1.1          # RS 하한: 1.0=시장 이상, 1.05=시장 대비 +5% 우위
+  volume_factor: 1.5
 
 
 telegram:
@@ -37,6 +39,7 @@ market_hours:
 notifications:
   summary_every_min: 60   # 60=매시 정각에만 요약 발송 (5, 10, 30 등도 가능)
   
+
 
 
 
