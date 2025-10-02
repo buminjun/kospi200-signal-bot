@@ -1,83 +1,97 @@
+# scanner.py
 import os
 import pandas as pd
+import yfinance as yf
 from datetime import datetime, timedelta
-from strategy import entry_signal, compute_indicators, _weekly_from_daily
-from utils import _notify, load_universe, fetch_daily_df, save_positions
+from strategy import compute_indicators, check_rules, check_strong_buy
 
-# ---------------------------------------------------
-# 주요 실행 루프
-# ---------------------------------------------------
-def scan_once(cfg):
-    ts = datetime.now()  # 현재 시각
-    uni = load_universe(cfg["universe_csv"])  # 종목 universe 로드
+# =========================
+# 유틸 함수
+# =========================
+def now_kst():
+    return datetime.utcnow() + timedelta(hours=9)
 
-    buy_candidates = []
-    strong_buy_candidates = []
-    sell_candidates = []
-    pos = pd.read_csv(cfg["positions_csv"]) if os.path.exists(cfg["positions_csv"]) else pd.DataFrame(columns=["code","name"])
+def load_universe(path="kospi200.csv"):
+    df = pd.read_csv(path, dtype=str)
+    if "종목코드" in df.columns:
+        df["code"] = df["종목코드"].str.zfill(6)
+    elif "code" not in df.columns:
+        raise KeyError("CSV에 '종목코드' 또는 'code' 컬럼이 필요합니다.")
+    return df
+
+def fetch_price(code, years=2):
+    """
+    yfinance에서 한국 종목 데이터 다운로드
+    """
+    ticker = f"{code}.KS"
+    try:
+        df = yf.download(ticker, period=f"{years}y")
+        df = df.rename(columns=str.lower)
+        return df
+    except Exception as e:
+        print(f"[Error] {code}: {e}")
+        return pd.DataFrame()
+
+# =========================
+# 알림 포맷
+# =========================
+def format_buy_msg(ts, code, name, strong=False):
+    if strong:
+        return f"🚀 강력매수 신호 [{code} {name}] @ {ts.strftime('%Y-%m-%d %H:%M')}"
+    else:
+        return f"📈 매수 신호 [{code} {name}] @ {ts.strftime('%Y-%m-%d %H:%M')}"
+
+# =========================
+# 메인 스캐너
+# =========================
+def scan(cfg):
+    ts = now_kst()
+    uni = load_universe(cfg["universe_csv"])
+
+    buy_signals = []
+    strong_signals = []
 
     for _, row in uni.iterrows():
-        code = str(row["code"])
-        name = row["name"]
+        code = row["code"]
+        name = row.get("종목명", code)
 
-        # 일봉 데이터 가져오기
-        end = ts.strftime("%Y%m%d")
-        start = (ts - timedelta(days=365*2)).strftime("%Y%m%d")
-        df = fetch_daily_df(code, start, end)
-        if df is None or df.empty:
+        df = fetch_price(code, years=2)
+        if df.empty or len(df) < 250:
             continue
 
-        # 주봉 변환
-        wdf = _weekly_from_daily(df)
+        ind = compute_indicators(df)
 
-        # 지표 계산
-        df = compute_indicators(df)
+        # --- 7개 규칙 체크
+        ok, rules = check_rules(ind)
+        if ok:
+            buy_signals.append((code, name))
+            continue
 
-        # 진입 신호 판정
-        sig = entry_signal(df, weekly_df=wdf)
+        # --- 강력매수 체크 (장대양봉)
+        if check_strong_buy(ind):
+            strong_signals.append((code, name))
 
-        if sig == "buy":
-            buy_candidates.append((code, name, df))
-        elif sig == "strong_buy":
-            strong_buy_candidates.append((code, name, df))
+    # =========================
+    # 결과 알림
+    # =========================
+    if buy_signals:
+        for code, name in buy_signals:
+            print(format_buy_msg(ts, code, name, strong=False))
 
-        # (추가: 매도조건 로직 있으면 여기서 sell_candidates 채움)
+    if strong_signals:
+        for code, name in strong_signals:
+            print(format_buy_msg(ts, code, name, strong=True))
 
-    # ---------------------------------------------------
-    # 알림 처리
-    # ---------------------------------------------------
-    if buy_candidates:
-        for code, name, df in buy_candidates:
-            msg = f"📈 매수 신호: {name} ({code}) - 7개 규칙 충족"
-            _notify(msg, cfg["telegram"]["enabled"], cfg["ntfy"]["enabled"],
-                    cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
-
-    if strong_buy_candidates:
-        for code, name, df in strong_buy_candidates:
-            msg = f"🚀 강력 매수 신호: {name} ({code}) - 횡보 후 첫 장대양봉"
-            _notify(msg, cfg["telegram"]["enabled"], cfg["ntfy"]["enabled"],
-                    cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
-
-    # (매도 알림도 필요시 추가)
-    if sell_candidates:
-        for code, name, price_now, reason in sell_candidates:
-            msg = f"⚠️ 매도 신호: {name} ({code}) - {reason}"
-            _notify(msg, cfg["telegram"]["enabled"], cfg["ntfy"]["enabled"],
-                    cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
-
-    # 포지션 저장
-    save_positions(pos, cfg["positions_csv"])
-
-
-def main():
-    import yaml
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    scan_once(cfg)
-
-
+# =========================
+# 실행
+# =========================
 if __name__ == "__main__":
-    main()
+    cfg = {
+        "universe_csv": "kospi200.csv"
+    }
+    scan(cfg)
+
+
 
 
 
