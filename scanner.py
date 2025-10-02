@@ -1,15 +1,14 @@
-# scanner.py
 import os
 import sys
+import time
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-import requests
 import pytz
-from datetime import datetime, timedelta
+import yaml
+import requests
 import yfinance as yf
-
-# 보조 데이터소스
-from pykrx import stock
+import requests_cache
 
 from strategy import (
     compute_indicators,
@@ -19,6 +18,16 @@ from strategy import (
 )
 
 KST = pytz.timezone("Asia/Seoul")
+
+# =========================
+# yfinance 세션 설정 (User-Agent 흉내 + 캐시)
+# =========================
+session = requests_cache.CachedSession('yfinance.cache')
+session.headers['User-Agent'] = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/91.0.4472.124 Safari/537.36"
+)
 
 # =========================
 # 시간 유틸
@@ -39,8 +48,12 @@ def inside_market_hours(cfg, ts=None):
     return (t >= datetime(ts.year,ts.month,ts.day,s_h,s_m,tzinfo=KST).time() and
             t <= datetime(ts.year,ts.month,ts.day,e_h,e_m,tzinfo=KST).time())
 
-def should_send_summary(ts, every_min):
-    return every_min > 0 and (ts.minute % every_min) == 0
+def should_send_summary(ts, every_min, jitter=False):
+    if every_min <= 0:
+        return False
+    if jitter:
+        return (ts.minute % every_min) in (0,1)
+    return (ts.minute % every_min) == 0
 
 # =========================
 # 알림
@@ -50,7 +63,9 @@ def send_telegram(msg, token, chat_id):
         return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        requests.post(url, data={"chat_id": chat_id, "text": msg})
+        resp = requests.post(url, data={"chat_id": chat_id, "text": msg})
+        if resp.status_code != 200:
+            print(f"[TG] HTTP {resp.status_code}: {resp.text}")
     except Exception as e:
         print(f"[TG] error: {e}")
 
@@ -58,7 +73,9 @@ def send_ntfy(msg, url):
     if not url:
         return
     try:
-        requests.post(url, data=msg.encode("utf-8"))
+        resp = requests.post(url, data=msg.encode("utf-8"))
+        if resp.status_code >= 300:
+            print(f"[NTFY] HTTP {resp.status_code}: {resp.text}")
     except Exception as e:
         print(f"[NTFY] error: {e}")
 
@@ -73,252 +90,256 @@ def _notify(msg, use_tg, use_ntfy, token_env, chat_env, ntfy_env):
         send_ntfy(msg, ntfy_url)
 
 # =========================
+# CSV IO
 # =========================
-# CSV IO (포지션/유니버스)
-# =========================
-def load_positions(path: str):
-    """보유 포지션 CSV를 읽어옵니다. 없으면 빈 프레임 반환."""
+def load_positions(path):
     try:
-        import pandas as pd
-        import numpy as np
         if not os.path.exists(path):
-            return pd.DataFrame(columns=["code", "name", "entry_date", "entry_price", "shares"])
+            return pd.DataFrame(columns=["code","name","entry_date","entry_price","shares"])
         df = pd.read_csv(path, encoding="utf-8-sig")
-        # 필요한 컬럼 보정
-        for c in ["code", "name", "entry_date", "entry_price", "shares"]:
+        for c in ["code","name","entry_date","entry_price","shares"]:
             if c not in df.columns:
                 df[c] = np.nan
-        # 코드는 항상 6자리 문자열
-        df["code"] = df["code"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
-        # 숫자형 보정
-        if "entry_price" in df.columns:
-            df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce")
-        if "shares" in df.columns:
-            df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0).astype(int)
-        return df[["code", "name", "entry_date", "entry_price", "shares"]]
+        df["code"] = df["code"].astype(str).str.zfill(6)
+        return df
     except Exception as e:
         print(f"[positions] load error: {e}")
-        return pd.DataFrame(columns=["code", "name", "entry_date", "entry_price", "shares"])
+        return pd.DataFrame(columns=["code","name","entry_date","entry_price","shares"])
 
-def save_positions(df, path: str):
-    """보유 포지션 CSV 저장."""
+def save_positions(df, path):
     try:
         df.to_csv(path, index=False, encoding="utf-8-sig")
     except Exception as e:
         print(f"[positions] save error: {e}")
 
-def load_universe(path: str):
-    """
-    유니버스 CSV를 읽어 (code, name) 반환.
-    - code/종목코드/티커/ticker/symbol 중 아무거나 허용
-    - name/종목명 없으면 code를 name으로 사용
-    - code는 항상 6자리 문자열로 변환
-    """
-    import pandas as pd
+def load_universe(path):
     df = pd.read_csv(path, encoding="utf-8-sig")
-    # 헤더 정리
-    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+    if "code" in df.columns:
+        df["code"] = df["code"].astype(str).str.zfill(6)
+    elif "종목코드" in df.columns:
+        df["code"] = df["종목코드"].astype(str).str.zfill(6)
+    else:
+        raise KeyError("CSV에 'code' 또는 '종목코드' 컬럼이 없습니다")
 
-    # code 컬럼 찾기
-    code_col = None
-    for cand in ["code", "종목코드", "티커", "ticker", "symbol"]:
-        if cand in df.columns:
-            code_col = cand
-            break
-    if code_col is None:
-        raise KeyError("universe.csv must have 'code' column")
+    if "name" not in df.columns and "종목명" in df.columns:
+        df["name"] = df["종목명"]
 
-    # name 컬럼 찾기 (없으면 code 재사용)
-    name_col = None
-    for cand in ["name", "종목명", "이름"]:
-        if cand in df.columns:
-            name_col = cand
-            break
-    if name_col is None:
-        name_col = code_col
-        df[name_col] = df[code_col]
-
-    # 값 정리: 문자열화, 앞자리 0 보존
-    out = pd.DataFrame({
-        "code": df[code_col].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6),
-        "name": df[name_col].astype(str).str.strip()
-    })
-    out = out.dropna().drop_duplicates()
-    return out
-
+    return df[["code","name"]].dropna().drop_duplicates()
 
 # =========================
-# 데이터 취득
+# 데이터 가져오기 (yfinance 전용)
 # =========================
-def fetch_yf(code, start_dt, end_dt):
-    """야후 → 티커 변환 후 일봉 OHLCV"""
+def fetch_yf(code, start_dt, end_dt, market="KS"):
+    ticker = f"{code}.{market}"
     try:
-        # 코드가 6자리만 있으면 .KS 붙여줌
-        t = code if code.endswith((".KS", ".KQ")) else f"{code}.KS"
         df = yf.download(
-            tickers=t,
+            ticker,
             start=start_dt.strftime("%Y-%m-%d"),
-            end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-            auto_adjust=True,   # 배당/액면조정 반영
-            progress=False,
-            threads=False,
+            end=end_dt.strftime("%Y-%m-%d"),
+            session=session,
+            progress=False
         )
         if df is None or df.empty:
+            print(f"[yfinance] {ticker} → empty")
             return None
-        # yfinance 컬럼 정규화
-        cols = {c.lower(): c for c in df.columns}
-        out = pd.DataFrame(index=pd.to_datetime(df.index))
-        out["open"]   = df[ [k for k in df.columns if "open"   in k.lower()][0] ]
-        out["high"]   = df[ [k for k in df.columns if "high"   in k.lower()][0] ]
-        out["low"]    = df[ [k for k in df.columns if "low"    in k.lower()][0] ]
-        out["close"]  = df[ [k for k in df.columns if "close"  in k.lower()][0] ]
-        out["volume"] = df[ [k for k in df.columns if "volume" in k.lower()][0] ].fillna(0)
-        return out.sort_index()
-    except Exception as e:
-        print(f"[yfinance] {code} fail: {e}")
-        return None
-
-def fetch_pykrx(code, start_dt, end_dt):
-    """pykrx → 네이버 백엔드 사용"""
-    try:
-        s = start_dt.strftime("%Y%m%d"); e = end_dt.strftime("%Y%m%d")
-        df = stock.get_market_ohlcv_by_date(s, e, code)
-        if df is None or df.empty:
-            return None
-        df = df.rename(columns={"시가":"open","고가":"high","저가":"low","종가":"close","거래량":"volume"})
+        df = df.rename(columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Adj Close": "close",
+            "Volume": "volume"
+        })
         df.index = pd.to_datetime(df.index)
-        return df[["open","high","low","close","volume"]].sort_index()
+        return df.sort_index()
     except Exception as e:
-        print(f"[pykrx] {code} fail: {e}")
+        print(f"[yfinance] {ticker} fail: {e}")
         return None
 
 def fetch_daily_df(code, start_dt, end_dt):
-    """1순위: yfinance → 실패 시 pykrx"""
-    df = fetch_yf(code, start_dt, end_dt)
-    src = "yfinance"
-    if df is None or df.empty:
-        df = fetch_pykrx(code, start_dt, end_dt)
-        src = "pykrx"
-    if df is None or df.empty:
-        print(f"[DATA] {code} → empty from both sources")
-        return None, None
-    return df, src
+    df = fetch_yf(code, start_dt, end_dt, market="KS")
+    return df, "yfinance"
 
 def fetch_benchmark(start_dt, end_dt):
-    """벤치마크(KOSPI) 시총지수: 야후 ^KS11 → 실패 시 pykrx index 1001"""
-    # 1) yfinance
     try:
-        k = yf.download(
-            "^KS11",
-            start=start_dt.strftime("%Y-%m-%d"),
-            end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-            auto_adjust=True,
-            progress=False,
-            threads=False,
-        )
-        if k is not None and not k.empty:
-            close = k[ [c for c in k.columns if "close" in c.lower()][0] ]
-            s = pd.Series(close.values, index=pd.to_datetime(close.index))
-            return s.sort_index()
-    except Exception as e:
-        print(f"[yfinance] ^KS11 fail: {e}")
-
-    # 2) pykrx (KOSPI: 1001)
-    try:
-        s = stock.get_index_ohlcv_by_date(
-            start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d"), "1001"
-        )["종가"]
+        df = yf.download("^KS11",
+                         start=start_dt.strftime("%Y-%m-%d"),
+                         end=end_dt.strftime("%Y-%m-%d"),
+                         session=session,
+                         progress=False)
+        if df is None or df.empty:
+            return None
+        s = df["Close"]
         s.index = pd.to_datetime(s.index)
         return s.sort_index()
     except Exception as e:
-        print(f"[pykrx] KOSPI fail: {e}")
-
+        print(f"[yfinance] KS11 fail: {e}")
     return None
 
 # =========================
 # 포맷팅
 # =========================
-def fmt_price(x): return f"{x:,.0f}"
+def fmt_price(x): 
+    try: return f"{float(x):,.0f}"
+    except: return str(x)
 
 def format_buy_msg(ts, code, name, price, kind="매수"):
-    return f"✅ {kind} 신호\n{name}({code}) @ {fmt_price(price)}\n{ts.strftime('%Y-%m-%d %H:%M:%S')} KST"
+    return (f"✅ {kind} 신호\n"
+            f"{name}({code}) @ {fmt_price(price)}\n"
+            f"{ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
+
+def format_strong_msg(ts, code, name, price):
+    return (f"🚀 강력매수(규칙8 단독)\n"
+            f"{name}({code}) @ {fmt_price(price)}\n"
+            f"{ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
 
 def format_sell_msg(ts, code, name, price, reason):
-    return f"🔻 매도 ({reason})\n{name}({code}) @ {fmt_price(price)}\n{ts.strftime('%Y-%m-%d %H:%M:%S')} KST"
+    return (f"🔻 매도 신호 ({reason})\n"
+            f"{name}({code}) @ {fmt_price(price)}\n"
+            f"{ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
 
 # =========================
-# 스캔
+# 스캔 메인
 # =========================
 def scan_once(cfg):
     ts = now_kst()
-    start_dt = ts - timedelta(days=420)
-    end_dt = ts
+    start_dt = ts - timedelta(days=max(lookback_padding(cfg), 420))
+    end_dt   = ts
 
     uni = load_universe(cfg["universe_csv"])
     pos = load_positions(cfg["positions_csv"])
 
-    use_tg = cfg["telegram"]["enabled"]
+    bench = fetch_benchmark(start_dt, end_dt)
+
+    use_tg   = cfg["telegram"]["enabled"]
     use_ntfy = cfg["ntfy"]["enabled"]
+    force_summary = os.getenv("FORCE_SUMMARY", "0") == "1"
     market_open = inside_market_hours(cfg, ts)
 
-    buy_cands, strong_cands, sell_cands, failed = [], [], [], []
+    buy_cands = []
+    strong_cands = []
+    sell_cands = []
+    failed = []
 
     for code, name in uni[["code","name"]].itertuples(index=False):
         df, src = fetch_daily_df(code, start_dt, end_dt)
-        if df is None: 
-            failed.append(code); continue
-        ind = compute_indicators(df)
+        if df is None or df.empty:
+            failed.append(code)
+            continue
+
+        ind = compute_indicators(
+            df,
+            lookback=cfg.get("lookback", 120),
+            bench_close=bench,
+            rs_window=cfg.get("filters",{}).get("rs_window", 120),
+            hhv_window=cfg.get("entry",{}).get("hhv_window", 30),
+        )
         row = ind.iloc[-1]
 
-        if entry_signal_7rules(row, ind):
-            buy_cands.append((code,name,float(row["close"])))
-        elif strong_buy_signal_8(row, ind):
-            strong_cands.append((code,name,float(row["close"])))
+        ok7 = entry_signal_7rules(row, ind, strict_25=0.25)
+        ok8 = strong_buy_signal_8(row, ind)
 
-    # 매수 실행
+        if ok7:
+            buy_cands.append((code, name, float(row["close"])))
+        elif ok8:
+            strong_cands.append((code, name, float(row["close"])))
+
+        time.sleep(1)  # 종목별 조회 사이 지연 (차단 방지)
+
     if market_open and (buy_cands or strong_cands):
         queue = strong_cands + buy_cands
-        for code,name,price in queue:
-            msg = format_buy_msg(ts,code,name,price,kind="강력매수" if (code,name,price) in strong_cands else "매수")
-            _notify(msg,use_tg,use_ntfy,cfg["telegram"]["token_env"],cfg["telegram"]["chat_id_env"],cfg["ntfy"]["url_env"])
+        cur = len(pos)
+        cap = max(cfg["max_positions"] - cur, 0)
+        for code, name, price in queue[:cap]:
+            kind = "강력매수" if (code, name, price) in strong_cands else "매수"
+            _notify(format_buy_msg(ts, code, name, price, kind=kind),
+                    use_tg, use_ntfy,
+                    cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
+            new_row = {
+                "code": code, "name": name,
+                "entry_date": ts.strftime("%Y-%m-%d"),
+                "entry_price": float(price),
+                "shares": 0
+            }
+            pos = pd.concat([pos, pd.DataFrame([new_row])], ignore_index=True)
 
-    # 매도 체크
+    time_stop_days = int(cfg.get("exit",{}).get("time_stop_days", 5))
     for r in pos.to_dict("records"):
-        code,name,entry_price = str(r["code"]).zfill(6),r["name"],float(r.get("entry_price",0) or 0)
-        df,_ = fetch_daily_df(code,start_dt,end_dt)
-        if df is None or len(df)<20: continue
+        code = str(r["code"]).zfill(6); name = r["name"]
+        entry_price = float(r.get("entry_price", 0) or 0)
+        entry_date  = r.get("entry_date", None)
+        if not entry_price or not entry_date:
+            continue
+        df, src = fetch_daily_df(code, start_dt, end_dt)
+        if df is None or df.empty or len(df) < 20:
+            continue
         ind = compute_indicators(df)
-        last = ind.iloc[-1]; price_now = float(last["close"]); sma10 = last.get("SMA10",np.nan)
+        last = ind.iloc[-1]
+        price_now = float(last["close"])
+        sma10_now = float(last["SMA10"]) if not pd.isna(last["SMA10"]) else None
+
         reason = None
-        if price_now < sma10: reason="10SMA 이탈"
-        if price_now <= entry_price*0.95: reason="진입가 -5%"
+        if exit_signal(price_now, sma10_now, entry_price, drop_pct=0.05):
+            if sma10_now is not None and price_now < sma10_now:
+                reason = "10SMA 이탈"
+            if price_now <= entry_price * 0.95:
+                reason = "진입가 -5%"
+
+        if reason is None and time_stop_days > 0:
+            try:
+                d0 = datetime.strptime(entry_date, "%Y-%m-%d").date()
+                if (ts.date() - d0).days >= time_stop_days:
+                    reason = f"보유 {time_stop_days}일 경과"
+            except:
+                pass
+
         if reason:
-            msg = format_sell_msg(ts,code,name,price_now,reason)
-            _notify(msg,use_tg,use_ntfy,cfg["telegram"]["token_env"],cfg["telegram"]["chat_id_env"],cfg["ntfy"]["url_env"])
-            pos = pos[pos["code"]!=code]
+            sell_cands.append((code, name, price_now, reason))
+
+    if market_open and sell_cands:
+        closed = []
+        for code, name, price_now, reason in sell_cands:
+            _notify(format_sell_msg(ts, code, name, price_now, reason),
+                    use_tg, use_ntfy,
+                    cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
+            closed.append(code)
+        if closed:
+            pos = pos[~pos["code"].isin(closed)]
 
     save_positions(pos, cfg["positions_csv"])
 
-    # 요약
-    every = int(cfg.get("notifications",{}).get("summary_every_min",60))
-    if should_send_summary(ts,every):
-        summary = f"📬 요약\n대상 {len(uni)}개, 실패 {len(failed)}개\n매수 {len(buy_cands)}개 / 강력매수 {len(strong_cands)}개 / 매도 {len(sell_cands)}개"
-        _notify(summary,use_tg,use_ntfy,cfg["telegram"]["token_env"],cfg["telegram"]["chat_id_env"],cfg["ntfy"]["url_env"])
+    every = int(cfg.get("notifications",{}).get("summary_every_min", 60))
+    if (market_open and should_send_summary(ts, every)) or (force_summary and (ts.minute % every == 0)):
+        summary = (f"📬 요약\n"
+                   f"대상: {len(uni)}개 / 실패: {len(failed)}개\n"
+                   f"매수: {len(buy_cands)}개 / 강력매수: {len(strong_cands)}개 / 매도: {len(sell_cands)}개\n"
+                   f"{ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
+        _notify(summary, use_tg, use_ntfy,
+                cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
+
+    if failed:
+        print(f"[DATA] failed tickers ({len(failed)}): {failed[:10]}{' ...' if len(failed)>10 else ''}")
+
+def lookback_padding(cfg):
+    lb = int(cfg.get("lookback", 120))
+    return max(lb + 220, 320)
 
 # =========================
 # main
 # =========================
-import yaml
 def load_config():
-    with open("config.yaml","r",encoding="utf-8") as f:
+    p = "config.yaml"
+    with open(p, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 def main():
-    cfg=load_config()
+    cfg = load_config()
     scan_once(cfg)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
+
+
 
 
 
