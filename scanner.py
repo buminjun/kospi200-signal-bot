@@ -75,22 +75,22 @@ def _notify(msg, use_tg, use_ntfy, token_env, chat_env, ntfy_env):
 # =========================
 # CSV IO
 # =========================
-def load_positions(path):
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["code","name","entry_date","entry_price","shares"])
-    return pd.read_csv(path, encoding="utf-8-sig")
-
-def save_positions(df, path):
-    df.to_csv(path, index=False, encoding="utf-8-sig")
-
 def load_universe(path):
     df = pd.read_csv(path, encoding="utf-8-sig")
-    df.columns = [c.strip() for c in df.columns]
-    if "code" not in df.columns:
-        raise KeyError("universe.csv must have 'code' column")
-    if "name" not in df.columns:
-        df["name"] = df["code"]
-    return df[["code","name"]]
+
+    # code를 무조건 문자열로 처리 + 앞자리 0 유지 (6자리)
+    if "code" in df.columns:
+        df["code"] = df["code"].astype(str).str.zfill(6)
+    elif "종목코드" in df.columns:
+        df["code"] = df["종목코드"].astype(str).str.zfill(6)
+    else:
+        raise KeyError("CSV에 'code' 또는 '종목코드' 컬럼이 없습니다")
+
+    if "name" not in df.columns and "종목명" in df.columns:
+        df["name"] = df["종목명"]
+
+    return df[["code","name"]].dropna().drop_duplicates()
+
 
 # =========================
 # 데이터 취득
@@ -264,4 +264,5 @@ def main():
 
 if __name__=="__main__":
     main()
+
 
