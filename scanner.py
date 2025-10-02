@@ -1,21 +1,14 @@
-# scanner.py
 import os
 import sys
-import io
 import json
 import time
-import math
-from datetime import datetime, timedelta, timezone
-
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import pytz
 import yaml
 import requests
-
-# 데이터 소스
-import FinanceDataReader as fdr
-from pykrx import stock
+import yfinance as yf
 
 from strategy import (
     compute_indicators,
@@ -61,7 +54,6 @@ def send_telegram(msg, token, chat_id):
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         resp = requests.post(url, data={"chat_id": chat_id, "text": msg})
-        # 디버그 정도만
         if resp.status_code != 200:
             print(f"[TG] HTTP {resp.status_code}: {resp.text}")
     except Exception as e:
@@ -88,7 +80,7 @@ def _notify(msg, use_tg, use_ntfy, token_env, chat_env, ntfy_env):
         send_ntfy(msg, ntfy_url)
 
 # =========================
-# CSV IO (포지션/유니버스)
+# CSV IO
 # =========================
 def load_positions(path):
     try:
@@ -111,7 +103,6 @@ def save_positions(df, path):
         print(f"[positions] save error: {e}")
 
 def load_universe(path):
-    # 다양한 헤더 대응: code/종목코드, name/종목명
     df = pd.read_csv(path, encoding="utf-8-sig")
     df = df.map(lambda x: x.strip() if isinstance(x,str) else x)
     cols = [c.replace("\ufeff","").strip() for c in df.columns]
@@ -127,20 +118,9 @@ def load_universe(path):
             name_col = cand; break
 
     if code_col is None:
-        # 혹시 '코드\t이름'처럼 구분자 꼬인 파일 방지
-        if len(df.columns)==1 and "\t" in df.columns[0]:
-            df = pd.read_csv(path, sep="\t", encoding="utf-8-sig")
-            cols = [c.replace("\ufeff","").strip() for c in df.columns]
-            df.columns = cols
-            for cand in ["code","종목코드","티커","ticker","symbol"]:
-                if cand in df.columns:
-                    code_col = cand; break
-
-    if code_col is None:
-        raise KeyError("CSV에서 종목코드 컬럼을 찾지 못했습니다. (code/종목코드/티커/ticker/symbol)")
+        raise KeyError("CSV에서 종목코드 컬럼을 찾지 못했습니다.")
 
     if name_col is None:
-        # 이름이 없으면 코드=이름
         name_col = code_col
         df[name_col] = df[code_col]
 
@@ -149,77 +129,56 @@ def load_universe(path):
     return out.dropna().drop_duplicates()
 
 # =========================
-# 데이터 취득: FDR → 실패시 pykrx
+# 데이터 취득 (yfinance 단독)
 # =========================
-def _rename_ohlcv(df):
-    # FDR/pykrx 공통 포맷으로
-    cols = {c.lower():c for c in df.columns}
-    df2 = pd.DataFrame(index=df.index)
-    for src, dst in [("open","open"),("high","high"),("low","low"),("close","close"),("volume","volume")]:
-        for cand in [src, src.capitalize(), src.upper(), {"open":"시가","high":"고가","low":"저가","close":"종가","volume":"거래량"}[src]]:
-            if cand in df.columns:
-                df2[dst] = df[cand]; break
-    return df2.dropna()
-
-def fetch_fdr(code, start_dt, end_dt):
-    try:
-        df = fdr.DataReader(code, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
-        if df is None or df.empty:
-            return None
-        df = _rename_ohlcv(df)
-        df.index = pd.to_datetime(df.index)
-        return df.sort_index()
-    except Exception as e:
-        print(f"[FDR] {code} fail: {e}")
-        return None
-
-def fetch_pykrx(code, start_dt, end_dt):
-    try:
-        s = start_dt.strftime("%Y%m%d"); e = end_dt.strftime("%Y%m%d")
-        df = stock.get_market_ohlcv_by_date(s, e, code)
-        if df is None or df.empty:
-            return None
-        df = df.rename(columns={"시가":"open","고가":"high","저가":"low","종가":"close","거래량":"volume"})
-        df.index = pd.to_datetime(df.index)
-        return df.sort_index()
-    except Exception as e:
-        print(f"[pykrx] {code} fail: {e}")
-        return None
-
 def fetch_daily_df(code, start_dt, end_dt):
-    df = fetch_fdr(code, start_dt, end_dt)
-    src = "FDR"
-    if df is None or df.empty:
-        df = fetch_pykrx(code, start_dt, end_dt)
-        src = "pykrx"
-    if df is None or df.empty:
-        print(f"[DATA] {code} → empty from both sources")
-        return None, None
-    return df, src
+    try:
+        # 종목코드 → .KS / .KQ 붙여줌
+        ticker = f"{code}.KS"
+        df = yf.download(
+            ticker,
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=end_dt.strftime("%Y-%m-%d")
+        )
+        if df is None or df.empty:
+            ticker = f"{code}.KQ"
+            df = yf.download(
+                ticker,
+                start=start_dt.strftime("%Y-%m-%d"),
+                end=end_dt.strftime("%Y-%m-%d")
+            )
+        if df is None or df.empty:
+            print(f"[yfinance] {code} → empty")
+            return None, "yfinance"
+
+        df = df.rename(columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume"
+        })
+        return df.dropna(), "yfinance"
+    except Exception as e:
+        print(f"[yfinance] {code} fail: {e}")
+        return None, "yfinance"
 
 def fetch_benchmark(start_dt, end_dt):
-    # KOSPI: FDR("KS11") → 실패시 pykrx index code "1001"
-    # (벤치마크는 RS 계산 용도, 없어도 동작)
     try:
-        k = fdr.DataReader("KS11", start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
-        if k is not None and not k.empty:
-            s = _rename_ohlcv(k)["close"]
-            s.index = pd.to_datetime(s.index)
-            return s.sort_index()
-    except Exception as e:
-        print(f"[FDR] KS11 fail: {e}")
-    try:
-        s = stock.get_index_ohlcv_by_date(start_dt.strftime("%Y%m%d"),
-                                          end_dt.strftime("%Y%m%d"),
-                                          "1001")["종가"]
+        df = yf.download("^KS11",
+                         start=start_dt.strftime("%Y-%m-%d"),
+                         end=end_dt.strftime("%Y-%m-%d"))
+        if df is None or df.empty:
+            return None
+        s = df["Close"]
         s.index = pd.to_datetime(s.index)
         return s.sort_index()
     except Exception as e:
-        print(f"[pykrx] KOSPI fail: {e}")
-    return None
+        print(f"[yfinance] KS11 fail: {e}")
+        return None
 
 # =========================
-# 포맷팅
+# 메시지 포맷
 # =========================
 def fmt_price(x): 
     try: return f"{float(x):,.0f}"
@@ -245,7 +204,7 @@ def format_sell_msg(ts, code, name, price, reason):
 # =========================
 def scan_once(cfg):
     ts = now_kst()
-    start_dt = ts - timedelta(days=max(lookback_padding(cfg), 420))  # 지표/주봉/52주 계산 여유
+    start_dt = ts - timedelta(days=max(lookback_padding(cfg), 420))
     end_dt   = ts
 
     uni = load_universe(cfg["universe_csv"])
@@ -261,10 +220,8 @@ def scan_once(cfg):
     buy_cands = []
     strong_cands = []
     sell_cands = []
-
     failed = []
 
-    # === 스캔
     for code, name in uni[["code","name"]].itertuples(index=False):
         df, src = fetch_daily_df(code, start_dt, end_dt)
         if df is None or df.empty:
@@ -280,12 +237,7 @@ def scan_once(cfg):
         )
         row = ind.iloc[-1]
 
-        # 7개 필수
-        ok7 = entry_signal_7rules(
-            row, ind,
-            strict_25=0.25  # 25% (필요시 config로 노출)
-        )
-        # 8번(횡보 후 첫 장대양봉)
+        ok7 = entry_signal_7rules(row, ind, strict_25=0.25)
         ok8 = strong_buy_signal_8(row, ind)
 
         if ok7:
@@ -293,9 +245,8 @@ def scan_once(cfg):
         elif ok8:
             strong_cands.append((code, name, float(row["close"])))
 
-    # === 매수 처리(장중에만, 포지션 한도)
+    # 매수
     if market_open and (buy_cands or strong_cands):
-        # 우선순위: 강력매수 → 일반매수
         queue = strong_cands + buy_cands
         cur = len(pos)
         cap = max(cfg["max_positions"] - cur, 0)
@@ -304,16 +255,15 @@ def scan_once(cfg):
             _notify(format_buy_msg(ts, code, name, price, kind=kind),
                     use_tg, use_ntfy,
                     cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
-            # 진입 저장
             new_row = {
                 "code": code, "name": name,
                 "entry_date": ts.strftime("%Y-%m-%d"),
                 "entry_price": float(price),
-                "shares": 0  # 사이징 미사용이면 0 유지
+                "shares": 0
             }
             pos = pd.concat([pos, pd.DataFrame([new_row])], ignore_index=True)
 
-    # === 보유분 매도 체크 (10SMA 이탈 or -5% or (옵션) 시간스톱)
+    # 매도
     time_stop_days = int(cfg.get("exit",{}).get("time_stop_days", 5))
     for r in pos.to_dict("records"):
         code = str(r["code"]).zfill(6); name = r["name"]
@@ -327,7 +277,7 @@ def scan_once(cfg):
         ind = compute_indicators(df)
         last = ind.iloc[-1]
         price_now = float(last["close"])
-        sma10_now = float(last["SMA10"]) if not pd.isna(last["SMA10"]) else None
+        sma10_now = float(last["SMA10"]) if "SMA10" in last and not pd.isna(last["SMA10"]) else None
 
         reason = None
         if exit_signal(price_now, sma10_now, entry_price, drop_pct=0.05):
@@ -335,7 +285,6 @@ def scan_once(cfg):
                 reason = "10SMA 이탈"
             if price_now <= entry_price * 0.95:
                 reason = "진입가 -5%"
-        # 시간 스톱(선택): 달력 일수 기준
         if reason is None and time_stop_days > 0:
             try:
                 d0 = datetime.strptime(entry_date, "%Y-%m-%d").date()
@@ -343,11 +292,9 @@ def scan_once(cfg):
                     reason = f"보유 {time_stop_days}일 경과"
             except:
                 pass
-
         if reason:
             sell_cands.append((code, name, price_now, reason))
 
-    # === 매도 실행(장중)
     if market_open and sell_cands:
         closed = []
         for code, name, price_now, reason in sell_cands:
@@ -358,26 +305,19 @@ def scan_once(cfg):
         if closed:
             pos = pos[~pos["code"].isin(closed)]
 
-    # === 저장
     save_positions(pos, cfg["positions_csv"])
 
-    # === 요약 (장중 매시간 or 강제)
     every = int(cfg.get("notifications",{}).get("summary_every_min", 60))
     if (market_open and should_send_summary(ts, every)) or (force_summary and (ts.minute % every == 0)):
         summary = (f"📬 요약\n"
-                   f"대상: {len(uni)}개 / 불러오기 실패: {len(failed)}개\n"
+                   f"대상: {len(uni)}개 / 실패: {len(failed)}개\n"
                    f"매수: {len(buy_cands)}개 / 강력매수: {len(strong_cands)}개 / 매도: {len(sell_cands)}개\n"
                    f"{ts.strftime('%Y-%m-%d %H:%M:%S')} KST")
         _notify(summary, use_tg, use_ntfy,
                 cfg["telegram"]["token_env"], cfg["telegram"]["chat_id_env"], cfg["ntfy"]["url_env"])
 
-    # 디버그 출력
-    if failed:
-        print(f"[DATA] failed tickers ({len(failed)}): {failed[:10]}{' ...' if len(failed)>10 else ''}")
-
 def lookback_padding(cfg):
     lb = int(cfg.get("lookback", 120))
-    # MA200/52주/주봉 등을 위해 여유
     return max(lb + 220, 320)
 
 # =========================
@@ -390,33 +330,7 @@ def load_config():
 
 def main():
     cfg = load_config()
-    mode = None
-    if len(sys.argv) > 1 and sys.argv[1] == "--mode":
-        mode = sys.argv[2] if len(sys.argv) > 2 else None
-    # EOD/LIVE 구분을 지금은 동일 처리 (스케줄/환경변수로 제어)
     scan_once(cfg)
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
