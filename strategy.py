@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 # =========================
-# 유틸 함수
+# 기본 유틸
 # =========================
 def _sma(s, w):
     return s.rolling(w).mean()
@@ -15,120 +15,165 @@ def _atr(df, period=14):
     tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
     return tr.rolling(period).mean()
 
+def _weekly(df):
+    # 주봉: 금요일 기준
+    o = df["open"].resample("W-FRI").first()
+    h = df["high"].resample("W-FRI").max()
+    l = df["low" ].resample("W-FRI").min()
+    c = df["close"].resample("W-FRI").last()
+    v = df["volume"].resample("W-FRI").sum()
+    w = pd.DataFrame({"open":o,"high":h,"low":l,"close":c,"volume":v}).dropna()
+    return w
+
 # =========================
-# 지표 계산
+# 상대강도(RS)
 # =========================
-def compute_indicators(df, lookback=250):
+def compute_rs(close_series, bench_close, window=120):
     """
-    df: 일봉 데이터프레임 (columns: open, high, low, close, volume)
+    RS = (종목 N일 수익률) / (벤치마크 N일 수익률)
+    """
+    if bench_close is None:
+        return pd.Series(index=close_series.index, dtype=float)
+    base  = close_series / close_series.shift(window)
+    bench = (bench_close.reindex(close_series.index) /
+             bench_close.reindex(close_series.index).shift(window))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = base / bench
+    return rs
+
+# =========================
+# 지표/특징 계산
+# =========================
+def compute_indicators(df,
+                       lookback=300,
+                       bench_close=None,
+                       rs_window=120,
+                       hhv_window=30):
+    """
+    df columns(lower): open, high, low, close, volume (DatetimeIndex, tz-naive)
     """
     out = df.copy()
 
-    # 이동평균선
+    # MAs / ATR
     out["SMA10"]  = _sma(out["close"], 10)
     out["SMA20"]  = _sma(out["close"], 20)
     out["SMA60"]  = _sma(out["close"], 60)
     out["SMA150"] = _sma(out["close"], 150)
     out["SMA200"] = _sma(out["close"], 200)
+    out["ATR14"]  = _atr(out, 14)
 
-    # ATR
-    out["ATR14"] = _atr(out, 14)
+    # HHV/LLV
+    out["HHV30"]  = out["high"].rolling(hhv_window, min_periods=hhv_window).max().shift(1)
+    out["LLV252"] = out["low"].rolling(252, min_periods=200).min()  # ~52주 저가
 
-    # 52주 저가 (252거래일 ≈ 1년)
-    out["Low52W"] = out["low"].rolling(252, min_periods=252).min()
+    # RS
+    out["RS"] = compute_rs(out["close"], bench_close, window=rs_window)
 
-    # 고점/저점 추세 확인용
-    out["HHV20"] = out["high"].rolling(20).max()
-    out["LLV20"] = out["low"].rolling(20).min()
+    # 주봉 파생(규칙 5/6용)
+    w = _weekly(out)
+    w["chg"] = w["close"].diff()
+    w["vol_chg"] = w["volume"].diff()
+    w["is_up"] = w["chg"] > 0
+    w["is_dn"] = w["chg"] < 0
+    w["vol_up_when_up"] = (w["is_up"] & (w["volume"] > w["volume"].shift()))
+    w["vol_dn_when_dn"] = (w["is_dn"] & (w["volume"] < w["volume"].shift()))
 
-    # 주봉 변환 (거래량 규칙 체크용)
-    df_w = df.resample("W").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"})
-    df_w["Up"]   = df_w["close"] > df_w["close"].shift()
-    df_w["VolUp"] = (df_w["Up"]) & (df_w["volume"] > df_w["volume"].shift())
-    df_w["VolDn"] = (~df_w["Up"]) & (df_w["volume"] > df_w["volume"].shift())
-    out["W_VolUp"] = df_w["VolUp"].reindex(out.index).fillna(False)
-    out["W_VolDn"] = df_w["VolDn"].reindex(out.index).fillna(False)
+    # 최근 12주 요약 비율/카운트 (티커 전체 동일기간 비교 위함)
+    lastN = 12
+    wN = w.tail(lastN)
+    up_cnt  = int(wN["is_up"].sum())
+    dn_cnt  = int(wN["is_dn"].sum())
+    up_vol_ok = int(wN["vol_up_when_up"].sum())
+    dn_vol_ok = int(wN["vol_dn_when_dn"].sum())
+    out.loc[wN.index[-1] if len(wN) else out.index[-1], "W_UP_CNT"] = up_cnt
+    out.loc[wN.index[-1] if len(wN) else out.index[-1], "W_DN_CNT"] = dn_cnt
+    out.loc[wN.index[-1] if len(wN) else out.index[-1], "W_UP_VOL_OK"] = up_vol_ok
+    out.loc[wN.index[-1] if len(wN) else out.index[-1], "W_DN_VOL_OK"] = dn_vol_ok
+
+    # 횡보 탐지용 (규칙8)
+    # 20일 표준편차/종가 < 3% 이면 '횡보'로 간주
+    out["RANGE_TIGHT"] = (out["close"].rolling(20).std() / out["close"]).fillna(1.0) < 0.03
+    # 장대양봉: (종가-시가) >= 1.2*ATR14 & 거래량이 20일 평균 대비 1.5배
+    out["VOL_MA20"] = out["volume"].rolling(20).mean()
+    body = out["close"] - out["open"]
+    out["BIG_BULL"] = (body >= (1.2 * out["ATR14"])) & (out["volume"] >= 1.5 * out["VOL_MA20"])
 
     return out
 
 # =========================
-# 매수 신호
+# 규칙 평가
 # =========================
-def entry_signal(row, df=None):
-    """
-    7개 규칙 전부 충족해야 매수
-    """
-
-    # 규칙 1: 주가가 150일 또는 200일 이동평균선 위
-    rule1 = (row["close"] > row["SMA150"]) or (row["close"] > row["SMA200"])
-
-    # 규칙 2: 150일 이평선 > 200일 이평선
-    rule2 = row["SMA150"] > row["SMA200"]
-
-    # 규칙 3: 200일 이평선이 확실한 상승세
-    rule3 = row["SMA200"] > row["SMA200"].shift(20) if isinstance(row, pd.Series) else False
-
-    # 규칙 4: 고점과 저점이 연이어 높아진다
-    rule4 = (row["high"] >= row["HHV20"].shift(1)) and (row["low"] >= row["LLV20"].shift(1))
-
-    # 규칙 5: 주봉 상승 시 거래량 증가
-    rule5 = bool(row.get("W_VolUp", False))
-
-    # 규칙 6: 상승 주봉 거래량 > 하락 주봉 거래량
-    rule6 = (row.get("W_VolUp", False)) and not (row.get("W_VolDn", False))
-
-    # 규칙 7: 52주 신저가보다 최소 25% 이상 상승
-    if pd.notna(row["Low52W"]) and row["Low52W"] > 0:
-        rule7 = (row["close"] >= row["Low52W"] * 1.25)
-    else:
-        rule7 = False
-
-    return all([rule1, rule2, rule3, rule4, rule5, rule6, rule7])
-
-# =========================
-# 강력 매수 (8번 규칙)
-# =========================
-def strong_entry_signal(df):
-    """
-    횡보 후 첫 장대 양봉
-    df: DataFrame (최근 구간 확인)
-    """
-    if len(df) < 5:
+def _slope_up(series, lookback=20):
+    if series.isna().iloc[-1] or series.isna().iloc[-lookback:].any():
         return False
-    recent = df.iloc[-1]
-    prev = df.iloc[-5:-1]
+    return bool(series.iloc[-1] > series.iloc[-lookback])
 
-    cond_range = (prev["high"].max() - prev["low"].min()) / prev["low"].min() < 0.05
-    cond_candle = (recent["close"] > recent["open"] * 1.05) and (recent["close"] > prev["high"].max())
+def _higher_high_low(df, win=5):
+    # 최근 2개 구간의 고/저 비교
+    if len(df) < win*3:
+        return False
+    seg1 = df.iloc[-win:]      # 최신
+    seg0 = df.iloc[-2*win:-win]
+    if seg0["high"].max() == seg0["high"].max():  # no-op, for clarity
+        pass
+    return bool(seg1["high"].max() > seg0["high"].max() and
+                seg1["low"].min()  > seg0["low"].min())
 
-    return bool(cond_range and cond_candle)
-
-# =========================
-# 매도 신호
-# =========================
-def exit_signal(row, entry_price=None):
+def entry_signal_7rules(row, df_full, strict_25=0.25):
     """
-    매도 조건:
-    ① 10일선 하락이탈
-    ② 진입가 대비 -5% 손실
+    7개 필수:
+    1) 종가 > 150MA 또는 200MA (가능하면 둘 다 위)
+    2) 150MA > 200MA
+    3) 200MA 상승 기울기
+    4) 고점/저점 상승(최근 구간)
+    5) 주봉 상승시 거래량 증가
+    6) 거래량 수반 상승주봉 > 거래량 수반 하락주봉
+    7) 52주 저가대비 +25% 이상
     """
-    cond1 = row["close"] < row["SMA10"]
-    cond2 = False
-    if entry_price:
-        cond2 = row["close"] <= entry_price * 0.95
-    return cond1 or cond2
+    c = row["close"]; s150 = row["SMA150"]; s200 = row["SMA200"]
+    cond1 = False
+    if not pd.isna(s150) and not pd.isna(s200):
+        cond1 = (c > s150) and (c > s200)
+    elif not pd.isna(s200):
+        cond1 = (c > s200)
+    elif not pd.isna(s150):
+        cond1 = (c > s150)
+
+    cond2 = (row["SMA150"] > row["SMA200"]) if (not pd.isna(row["SMA150"]) and not pd.isna(row["SMA200"])) else False
+    cond3 = _slope_up(df_full["SMA200"], lookback=20)
+    cond4 = _higher_high_low(df_full, win=5)
+
+    # 최근 주봉 요약(12주)
+    up_cnt     = int(df_full["W_UP_CNT"].dropna().iloc[-1]) if "W_UP_CNT" in df_full.columns and not df_full["W_UP_CNT"].dropna().empty else 0
+    dn_cnt     = int(df_full["W_DN_CNT"].dropna().iloc[-1]) if "W_DN_CNT" in df_full.columns and not df_full["W_DN_CNT"].dropna().empty else 0
+    up_vol_ok  = int(df_full["W_UP_VOL_OK"].dropna().iloc[-1]) if "W_UP_VOL_OK" in df_full.columns and not df_full["W_UP_VOL_OK"].dropna().empty else 0
+    dn_vol_ok  = int(df_full["W_DN_VOL_OK"].dropna().iloc[-1]) if "W_DN_VOL_OK" in df_full.columns and not df_full["W_DN_VOL_OK"].dropna().empty else 0
+
+    cond5 = (up_vol_ok >= int(0.6 * max(up_cnt, 1)))  # 상승주 중 60% 이상이 거래량 증가 동반
+    cond6 = (up_vol_ok > dn_vol_ok)
+
+    cond7 = False
+    if not pd.isna(row.get("LLV252", np.nan)):
+        cond7 = (row["close"] >= (row["LLV252"] * (1.0 + strict_25)))
+
+    checks = [cond1,cond2,cond3,cond4,cond5,cond6,cond7]
+    return all(checks)
+
+def strong_buy_signal_8(row, df_full):
+    """
+    8) 횡보 후 첫 장대 양봉 (+거래량 급증)
+    """
+    tight = bool(row.get("RANGE_TIGHT", False))
+    big   = bool(row.get("BIG_BULL", False))
+    return tight and big
 
 # =========================
-# 포지션 사이징
+# 매도 시그널 (실전용)
 # =========================
-def position_size(equity, risk, atr_val):
-    try:
-        if atr_val is None or atr_val <= 0:
-            return 0
-        risk_amt = float(equity) * float(risk)
-        shares = int(max(risk_amt / atr_val, 0))
-        return shares
-    except Exception:
-        return 0
-
-
+def exit_signal(price_now, sma10_now, entry_price, drop_pct=0.05):
+    """
+    매도: ① 10일선 하향 이탈 or ② 진입가 대비 -5% 하락
+    """
+    cond_ma   = (price_now < sma10_now) if (sma10_now is not None and not pd.isna(sma10_now)) else False
+    cond_drop = (entry_price is not None and price_now <= entry_price * (1.0 - float(drop_pct)))
+    return bool(cond_ma or cond_drop)
