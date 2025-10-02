@@ -1,8 +1,9 @@
 pandas==2.2.2
 numpy==1.26.4
-yfinance==0.2.41
-pykrx==1.0.48
 requests==2.32.3
 PyYAML==6.0.2
 pytz==2024.1
 tzdata==2024.1
+yfinance==0.2.43
+FinanceDataReader==0.9.90
+pykrx==1.0.45
