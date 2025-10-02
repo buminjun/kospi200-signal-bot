@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 import yfinance as yf
 
 # 보조 데이터소스
-import FinanceDataReader as fdr
 from pykrx import stock
 
 from strategy import (
@@ -96,58 +95,90 @@ def load_universe(path):
 # =========================
 # 데이터 취득
 # =========================
-def fetch_yf_single(code, start_dt, end_dt):
+def fetch_yf(code, start_dt, end_dt):
+    """야후 → 티커 변환 후 일봉 OHLCV"""
     try:
-        ticker = code if code.endswith((".KS",".KQ")) else f"{code}.KS"
+        # 코드가 6자리만 있으면 .KS 붙여줌
+        t = code if code.endswith((".KS", ".KQ")) else f"{code}.KS"
         df = yf.download(
-            ticker,
+            tickers=t,
             start=start_dt.strftime("%Y-%m-%d"),
-            end=end_dt.strftime("%Y-%m-%d"),
+            end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+            auto_adjust=True,   # 배당/액면조정 반영
             progress=False,
-            threads=False
+            threads=False,
         )
         if df is None or df.empty:
             return None
-        df.index = pd.to_datetime(df.index)
-        df = df.rename(columns={
-            "Open": "open","High": "high","Low": "low",
-            "Close": "close","Adj Close": "close","Volume": "volume"
-        })
-        return df[["open","high","low","close","volume"]]
+        # yfinance 컬럼 정규화
+        cols = {c.lower(): c for c in df.columns}
+        out = pd.DataFrame(index=pd.to_datetime(df.index))
+        out["open"]   = df[ [k for k in df.columns if "open"   in k.lower()][0] ]
+        out["high"]   = df[ [k for k in df.columns if "high"   in k.lower()][0] ]
+        out["low"]    = df[ [k for k in df.columns if "low"    in k.lower()][0] ]
+        out["close"]  = df[ [k for k in df.columns if "close"  in k.lower()][0] ]
+        out["volume"] = df[ [k for k in df.columns if "volume" in k.lower()][0] ].fillna(0)
+        return out.sort_index()
     except Exception as e:
         print(f"[yfinance] {code} fail: {e}")
         return None
 
-def fetch_fdr(code, start_dt, end_dt):
-    try:
-        df = fdr.DataReader(code, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
-        if df is None or df.empty: return None
-        df.index = pd.to_datetime(df.index)
-        return df.rename(columns={"시가":"open","고가":"high","저가":"low","종가":"close","거래량":"volume"})[["open","high","low","close","volume"]]
-    except: return None
-
 def fetch_pykrx(code, start_dt, end_dt):
+    """pykrx → 네이버 백엔드 사용"""
     try:
         s = start_dt.strftime("%Y%m%d"); e = end_dt.strftime("%Y%m%d")
-        df = stock.get_market_ohlcv_by_date(s,e,code)
-        if df is None or df.empty: return None
+        df = stock.get_market_ohlcv_by_date(s, e, code)
+        if df is None or df.empty:
+            return None
+        df = df.rename(columns={"시가":"open","고가":"high","저가":"low","종가":"close","거래량":"volume"})
         df.index = pd.to_datetime(df.index)
-        return df.rename(columns={"시가":"open","고가":"high","저가":"low","종가":"close","거래량":"volume"})[["open","high","low","close","volume"]]
-    except: return None
+        return df[["open","high","low","close","volume"]].sort_index()
+    except Exception as e:
+        print(f"[pykrx] {code} fail: {e}")
+        return None
 
 def fetch_daily_df(code, start_dt, end_dt):
-    df = fetch_yf_single(code, start_dt, end_dt)
+    """1순위: yfinance → 실패 시 pykrx"""
+    df = fetch_yf(code, start_dt, end_dt)
     src = "yfinance"
-    if df is None or df.empty:
-        df = fetch_fdr(code, start_dt, end_dt)
-        src = "FDR"
     if df is None or df.empty:
         df = fetch_pykrx(code, start_dt, end_dt)
         src = "pykrx"
     if df is None or df.empty:
-        print(f"[DATA] {code} empty")
+        print(f"[DATA] {code} → empty from both sources")
         return None, None
     return df, src
+
+def fetch_benchmark(start_dt, end_dt):
+    """벤치마크(KOSPI) 시총지수: 야후 ^KS11 → 실패 시 pykrx index 1001"""
+    # 1) yfinance
+    try:
+        k = yf.download(
+            "^KS11",
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+            auto_adjust=True,
+            progress=False,
+            threads=False,
+        )
+        if k is not None and not k.empty:
+            close = k[ [c for c in k.columns if "close" in c.lower()][0] ]
+            s = pd.Series(close.values, index=pd.to_datetime(close.index))
+            return s.sort_index()
+    except Exception as e:
+        print(f"[yfinance] ^KS11 fail: {e}")
+
+    # 2) pykrx (KOSPI: 1001)
+    try:
+        s = stock.get_index_ohlcv_by_date(
+            start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d"), "1001"
+        )["종가"]
+        s.index = pd.to_datetime(s.index)
+        return s.sort_index()
+    except Exception as e:
+        print(f"[pykrx] KOSPI fail: {e}")
+
+    return None
 
 # =========================
 # 포맷팅
@@ -233,3 +264,4 @@ def main():
 
 if __name__=="__main__":
     main()
+
