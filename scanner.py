@@ -73,23 +73,78 @@ def _notify(msg, use_tg, use_ntfy, token_env, chat_env, ntfy_env):
         send_ntfy(msg, ntfy_url)
 
 # =========================
-# CSV IO
 # =========================
-def load_universe(path):
+# CSV IO (포지션/유니버스)
+# =========================
+def load_positions(path: str):
+    """보유 포지션 CSV를 읽어옵니다. 없으면 빈 프레임 반환."""
+    try:
+        import pandas as pd
+        import numpy as np
+        if not os.path.exists(path):
+            return pd.DataFrame(columns=["code", "name", "entry_date", "entry_price", "shares"])
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        # 필요한 컬럼 보정
+        for c in ["code", "name", "entry_date", "entry_price", "shares"]:
+            if c not in df.columns:
+                df[c] = np.nan
+        # 코드는 항상 6자리 문자열
+        df["code"] = df["code"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
+        # 숫자형 보정
+        if "entry_price" in df.columns:
+            df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce")
+        if "shares" in df.columns:
+            df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0).astype(int)
+        return df[["code", "name", "entry_date", "entry_price", "shares"]]
+    except Exception as e:
+        print(f"[positions] load error: {e}")
+        return pd.DataFrame(columns=["code", "name", "entry_date", "entry_price", "shares"])
+
+def save_positions(df, path: str):
+    """보유 포지션 CSV 저장."""
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+    except Exception as e:
+        print(f"[positions] save error: {e}")
+
+def load_universe(path: str):
+    """
+    유니버스 CSV를 읽어 (code, name) 반환.
+    - code/종목코드/티커/ticker/symbol 중 아무거나 허용
+    - name/종목명 없으면 code를 name으로 사용
+    - code는 항상 6자리 문자열로 변환
+    """
+    import pandas as pd
     df = pd.read_csv(path, encoding="utf-8-sig")
+    # 헤더 정리
+    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
 
-    # code를 무조건 문자열로 처리 + 앞자리 0 유지 (6자리)
-    if "code" in df.columns:
-        df["code"] = df["code"].astype(str).str.zfill(6)
-    elif "종목코드" in df.columns:
-        df["code"] = df["종목코드"].astype(str).str.zfill(6)
-    else:
-        raise KeyError("CSV에 'code' 또는 '종목코드' 컬럼이 없습니다")
+    # code 컬럼 찾기
+    code_col = None
+    for cand in ["code", "종목코드", "티커", "ticker", "symbol"]:
+        if cand in df.columns:
+            code_col = cand
+            break
+    if code_col is None:
+        raise KeyError("universe.csv must have 'code' column")
 
-    if "name" not in df.columns and "종목명" in df.columns:
-        df["name"] = df["종목명"]
+    # name 컬럼 찾기 (없으면 code 재사용)
+    name_col = None
+    for cand in ["name", "종목명", "이름"]:
+        if cand in df.columns:
+            name_col = cand
+            break
+    if name_col is None:
+        name_col = code_col
+        df[name_col] = df[code_col]
 
-    return df[["code","name"]].dropna().drop_duplicates()
+    # 값 정리: 문자열화, 앞자리 0 보존
+    out = pd.DataFrame({
+        "code": df[code_col].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6),
+        "name": df[name_col].astype(str).str.strip()
+    })
+    out = out.dropna().drop_duplicates()
+    return out
 
 
 # =========================
@@ -264,5 +319,6 @@ def main():
 
 if __name__=="__main__":
     main()
+
 
 
