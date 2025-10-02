@@ -5,4 +5,4 @@ PyYAML==6.0.2
 pytz==2024.1
 tzdata==2024.1
 yfinance==0.2.43
-pykrx==1.0.45
+requests_cache==1.2.0
