@@ -87,79 +87,112 @@ def _to_ohlcv_lower(df):
     out = out.sort_index()
     return out
 
-def fetch_daily_df(code, start_date, end_date):
-    """pykrx로 일봉 OHLCV 로드 (code: '005930' 형태)"""
-    s = _yyyymmdd(start_date)
-    e = _yyyymmdd(end_date)
-    df = krx.get_market_ohlcv_by_date(s, e, code)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    return _to_ohlcv_lower(df)
+def fetch_daily_df(code: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame | None:
+    from pykrx import stock
+    s = start.strftime("%Y%m%d")
+    e = end.strftime("%Y%m%d")
+    last_err = None
+    for i in range(3):  # 최대 3회 재시도
+        try:
+            df = stock.get_market_ohlcv_by_date(s, e, code)
+            if df is None or df.empty:
+                last_err = RuntimeError("empty")
+                time.sleep(0.5)
+                continue
+            df = df.rename(columns={
+                "시가":"open", "고가":"high", "저가":"low",
+                "종가":"close", "거래량":"volume"
+            })
+            df.index = pd.to_datetime(df.index)
+            # 숫자형 강제
+            for c in ["open","high","low","close","volume"]:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df = df.dropna(subset=["open","high","low","close"])
+            if df.empty:
+                last_err = RuntimeError("nan-only")
+                time.sleep(0.5)
+                continue
+            return df
+        except Exception as e:
+            last_err = e
+            time.sleep(0.8)
+    print(f"[pykrx] {code} 조회 실패 → {last_err}")
+    return None
 
-def fetch_kospi_close(start_date, end_date):
-    """벤치마크가 필요하다면 사용 (여기선 안 씀)"""
-    s = _yyyymmdd(start_date)
-    e = _yyyymmdd(end_date)
-    idx = krx.get_index_ohlcv_by_date(s, e, "1001")  # KOSPI
-    if idx is None or idx.empty:
-        return pd.Series(dtype=float)
-    close = idx["종가"].astype(float)
-    close.index = pd.to_datetime(close.index)
-    return close.sort_index()
+
+# --- [PATCH] KOSPI 벤치마크 종가 (RS용) ---
+def fetch_kospi_close(start: pd.Timestamp, end: pd.Timestamp) -> pd.Series | None:
+    from pykrx import stock
+    s = start.strftime("%Y%m%d")
+    e = end.strftime("%Y%m%d")
+    try:
+        # KOSPI 지수코드 = '1001'
+        idx = stock.get_index_ohlcv_by_date(s, e, "1001")
+        if idx is None or idx.empty:
+            return None
+        idx.index = pd.to_datetime(idx.index)
+        close = idx["종가"].astype(float)
+        close.name = "KOSPI"
+        return close
+    except Exception as e:
+        print(f"[pykrx] KOSPI 지수 조회 실패 → {e}")
+        return None
 
 # =========================================================
 # 유틸: CSV 유니버스/포지션
 # =========================================================
-def load_universe(csv_path):
-    # 인코딩 자동 판별 시도
-    for enc in ["utf-8-sig", "cp949", "euc-kr"]:
+def load_universe(csv_path: str) -> pd.DataFrame:
+    import pandas as _pd
+    # 다양한 인코딩 시도
+    for enc in ["utf-8-sig", "cp949", "utf-8"]:
         try:
-            df = pd.read_csv(csv_path, encoding=enc)
+            df = _pd.read_csv(csv_path, sep=None, engine="python", encoding=enc)
             break
         except Exception:
-            df = None
-    if df is None or df.empty:
-        raise RuntimeError(f"유니버스 CSV 로드 실패: {csv_path}")
+            continue
+    else:
+        # 전부 실패 시 탭 구분자로 시도
+        df = _pd.read_csv(csv_path, sep="\t", engine="python")
 
-    # 칼럼 정리
-    df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-    cols = [c.strip().lower() for c in df.columns]
+    # 공백정리 (applymap 경고 회피: DataFrame.map 사용)
+    df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
+
+    cols = [c.strip() for c in df.columns]
     df.columns = cols
 
-    # 종목코드 칼럼 찾기
-    code_col = None
+    # 종목코드 칼럼 탐색
+    cand = None
     for c in ["code", "종목코드", "티커", "ticker", "symbol"]:
         if c in df.columns:
-            code_col = c
+            cand = c
             break
-    if code_col is None:
-        raise KeyError("CSV에서 종목코드 컬럼을 찾지 못했습니다. (code/종목코드/티커/ticker/symbol 중 하나)")
+    if cand is None:
+        # 첫번째 열을 코드로 가정 (탭/스페이스로 붙여넣은 경우 대비)
+        cand = df.columns[0]
 
-    # 이름(옵션)
+    # 6자리만 추출
+    codes = (
+        df[cand].astype(str)
+        .str.extract(r"(\d{6})", expand=False)
+        .dropna()
+        .str.zfill(6)
+    )
+    out = _pd.DataFrame({"code": codes})
+    # 이름(있으면)도 함께
     name_col = None
-    for c in ["name", "종목명", "이름"]:
+    for c in ["name", "종목명"]:
         if c in df.columns:
             name_col = c
             break
+    if name_col:
+        out["name"] = df[name_col].astype(str)
+    else:
+        out["name"] = ""
 
-    out = pd.DataFrame()
-    out["code"] = df[code_col].astype(str).str.extract(r"(\d{6})")[0].str.zfill(6)
-    out["name"] = df[name_col] if name_col else out["code"]
-    out = out.dropna(subset=["code"]).drop_duplicates(subset=["code"])
+    # 중복/결측 제거
+    out = out.dropna().drop_duplicates(subset=["code"]).reset_index(drop=True)
     return out
 
-def load_positions(path):
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["code","name","entry_date","entry_price","shares"])
-    df = pd.read_csv(path)
-    if df.empty:
-        return pd.DataFrame(columns=["code","name","entry_date","entry_price","shares"])
-    df["entry_price"] = pd.to_numeric(df["entry_price"], errors="coerce")
-    df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0).astype(int)
-    return df
-
-def save_positions(df, path):
-    df.to_csv(path, index=False)
 
 # =========================================================
 # 지표/규칙 계산
@@ -531,6 +564,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
