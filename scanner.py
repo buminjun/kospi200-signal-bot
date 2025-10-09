@@ -127,9 +127,6 @@ def load_universe(path):
     return df[["code","name"]].dropna().drop_duplicates()
 
 # =========================
-# 데이터 가져오기 (yfinance 전용)
-# =========================
-# =========================
 # 데이터 가져오기 (yfinance + 로컬 CSV)
 # =========================
 def fetch_yf(code, start_dt, end_dt, market="KS"):
@@ -246,8 +243,8 @@ def scan_once(cfg):
 
     uni = load_universe(cfg["universe_csv"])
     pos = load_positions(cfg["positions_csv"])
-
     bench = fetch_benchmark(start_dt, end_dt)
+    data_dir = cfg.get("data_dir", None)  # ✅ 추가: 다운로더 저장경로
 
     use_tg   = cfg["telegram"]["enabled"]
     use_ntfy = cfg["ntfy"]["enabled"]
@@ -260,7 +257,7 @@ def scan_once(cfg):
     failed = []
 
     for code, name in uni[["code","name"]].itertuples(index=False):
-        df, src = fetch_daily_df(code, start_dt, end_dt)
+        df, src = fetch_daily_df(code, start_dt, end_dt, data_dir=data_dir) 
         if df is None or df.empty:
             failed.append(code)
             continue
@@ -376,6 +373,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
