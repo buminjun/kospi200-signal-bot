@@ -298,7 +298,9 @@ def scan_once(cfg):
             }
             pos = pd.concat([pos, pd.DataFrame([new_row])], ignore_index=True)
 
-    time_stop_days = int(cfg.get("exit",{}).get("time_stop_days", 5))
+    exit_cfg = cfg.get("exit", {})
+    time_stop_days = int(exit_cfg.get("time_stop_days",
+                         exit_cfg.get("time_stop", 5)))
     for r in pos.to_dict("records"):
         code = str(r["code"]).zfill(6); name = r["name"]
         entry_price = float(r.get("entry_price", 0) or 0)
@@ -373,6 +375,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
