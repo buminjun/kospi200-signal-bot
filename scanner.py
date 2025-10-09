@@ -129,6 +129,9 @@ def load_universe(path):
 # =========================
 # 데이터 가져오기 (yfinance 전용)
 # =========================
+# =========================
+# 데이터 가져오기 (yfinance + 로컬 CSV)
+# =========================
 def fetch_yf(code, start_dt, end_dt, market="KS"):
     ticker = f"{code}.{market}"
     try:
@@ -141,7 +144,8 @@ def fetch_yf(code, start_dt, end_dt, market="KS"):
         )
         if df is None or df.empty:
             print(f"[yfinance] {ticker} → empty")
-            return None
+            return None, "yfinance"
+        # ✅ 소문자 컬럼으로 정규화 (strategy.compute_indicators 호환)
         df = df.rename(columns={
             "Open": "open",
             "High": "high",
@@ -151,32 +155,48 @@ def fetch_yf(code, start_dt, end_dt, market="KS"):
             "Volume": "volume"
         })
         df.index = pd.to_datetime(df.index)
-        return df.sort_index()
+        df = df[["open","high","low","close","volume"]].sort_index()
+        return df, "yfinance"
     except Exception as e:
         print(f"[yfinance] {ticker} fail: {e}")
-        return None
+        return None, "yfinance"
 
-def fetch_daily_df(code, start_dt, end_dt):
+
+def fetch_daily_df(code, start_dt, end_dt, data_dir=None):
+    """
+    1순위: 오늘자 로컬 CSV (키움 다운로더 결과)에서 code 필터링
+    2순위: yfinance
+    항상 (df, src) 튜플을 반환
+    """
+    # 오늘자 파일 경로 탐색
     today = datetime.now().strftime("%Y%m%d")
-    csv_path = f"ohlcv_{today}.csv"
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path, encoding="utf-8-sig")
-        df = df[df["code"] == code]
-        if not df.empty:
-            df = df.rename(columns={
-                "date": "Date",
-                "open": "Open",
-                "high": "High",
-                "low": "Low",
-                "close": "Close",
-                "volume": "Volume"
-            })
-            df = df.set_index("Date")
-            df.index = pd.to_datetime(df.index)
-            return df, "local_csv"
-    # fallback → yfinance
-    return fetch_yf(code, start_dt, end_dt)
+    candidates = []
+    if data_dir:
+        candidates.append(os.path.join(str(data_dir), f"ohlcv_{today}.csv"))
+    candidates.append(f"ohlcv_{today}.csv")  # 현재 작업 디렉토리도 시도
 
+    for csv_path in candidates:
+        if os.path.exists(csv_path):
+            try:
+                df = pd.read_csv(csv_path, encoding="utf-8-sig")
+                df = df[df["code"].astype(str).str.zfill(6) == str(code).zfill(6)]
+                if df.empty:
+                    continue
+                # ✅ 소문자 컬럼 유지 + DatetimeIndex
+                # (키움 다운로더는 'date, open, high, low, close, volume')
+                need = {"date","open","high","low","close","volume"}
+                if not need.issubset(set(c.lower() for c in df.columns)):
+                    # 혹시 대문자/혼합 들어오면 방어적으로 소문자화
+                    df.columns = [c.lower() for c in df.columns]
+                df = df[["date","open","high","low","close","volume"]].copy()
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.set_index("date").sort_index()
+                return df, "local_csv"
+            except Exception as e:
+                print(f"[local_csv] {csv_path} load fail: {e}")
+
+    # ✅ fallback → yfinance (항상 (df, 'yfinance') 형태로 반환)
+    return fetch_yf(code, start_dt, end_dt)
 
 def fetch_benchmark(start_dt, end_dt):
     try:
@@ -356,6 +376,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
