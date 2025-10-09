@@ -109,15 +109,25 @@ def _slope_up(series, lookback=20):
     return bool(series.iloc[-1] > series.iloc[-lookback])
 
 def _higher_high_low(df, win=5):
-    # 최근 2개 구간의 고/저 비교
-    if len(df) < win*3:
+    """
+    최근 2개 '연속' 구간의 고점/저점이 각각 이전 구간보다 상승인지 확인.
+    """
+    if len(df) < win * 3:
         return False
-    seg1 = df.iloc[-win:]      # 최신
-    seg0 = df.iloc[-2*win:-win]
-    if seg0["high"].max() == seg0["high"].max():  # no-op, for clarity
-        pass
-    return bool(seg1["high"].max() > seg0["high"].max() and
-                seg1["low"].min()  > seg0["low"].min())
+    seg2 = df.iloc[-3*win:-2*win]  # 과거
+    seg1 = df.iloc[-2*win:-win]    # 직전
+    seg0 = df.iloc[-win:]          # 현재
+
+    def hi_lo(seg):
+        return seg["high"].max(), seg["low"].min()
+
+    hi2, lo2 = hi_lo(seg2)
+    hi1, lo1 = hi_lo(seg1)
+    hi0, lo0 = hi_lo(seg0)
+
+    # 연속 상승: seg1 > seg2 그리고 seg0 > seg1
+    return (hi1 > hi2 and lo1 > lo2) and (hi0 > hi1 and lo0 > lo1)
+
 
 def entry_signal_7rules(row, df_full, strict_25=0.25):
     """
