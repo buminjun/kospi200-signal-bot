@@ -1,13 +1,21 @@
 equity: 10000000
 risk: 0.01
 max_positions: 5
-universe_csv: "kospi200.csv"
+
+# ▶ 로컬 데이터 디렉토리 추가
+data_dir: "C:\\KiwoomBot32\\data"
+
+# ▶ 유니버스 경로/포맷 맞추기: code[,name]
+universe_csv: "universe\\kospi200_codes.csv"
+
+# 포지션 파일 (code,name,entry_date,entry_price,shares)
 positions_csv: "positions.csv"
+
 lookback: 120
 
 entry:
   watchlist:
-  near_hhv30_pct: 0.01   # HHV30의 1% 이내이면 근접 후보
+  near_hhv30_pct: 0.01
   hhv_window: 30
   buffer: 0.001
   require_ma_trend: true
@@ -15,13 +23,13 @@ entry:
 exit:
   stop_atr_multiple: 1.5
   ma_exit: true
+  # ▶ 키 이름 유지: 스캐너에서 time_stop_days로 읽히게 패치할 것
   time_stop: 5
 
 filters:
-  rs_window: 120        # RS 계산 기간(일): 60 또는 120 추천
-  rs_min: 1.1          # RS 하한: 1.0=시장 이상, 1.05=시장 대비 +5% 우위
+  rs_window: 120
+  rs_min: 1.1
   volume_factor: 1.5
-
 
 telegram:
   enabled: true
@@ -37,8 +45,9 @@ market_hours:
   end_kst: "15:30"
 
 notifications:
-  summary_every_min: 60   # 60=매시 정각에만 요약 발송 (5, 10, 30 등도 가능)
-  
+  summary_every_min: 60
+
+
 
 
 
