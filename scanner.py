@@ -157,8 +157,26 @@ def fetch_yf(code, start_dt, end_dt, market="KS"):
         return None
 
 def fetch_daily_df(code, start_dt, end_dt):
-    df = fetch_yf(code, start_dt, end_dt, market="KS")
-    return df, "yfinance"
+    today = datetime.now().strftime("%Y%m%d")
+    csv_path = f"ohlcv_{today}.csv"
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        df = df[df["code"] == code]
+        if not df.empty:
+            df = df.rename(columns={
+                "date": "Date",
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume"
+            })
+            df = df.set_index("Date")
+            df.index = pd.to_datetime(df.index)
+            return df, "local_csv"
+    # fallback → yfinance
+    return fetch_yf(code, start_dt, end_dt)
+
 
 def fetch_benchmark(start_dt, end_dt):
     try:
@@ -338,6 +356,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
